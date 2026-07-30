@@ -1,0 +1,339 @@
+# Team AI Instructions
+
+These instructions apply to all AI-assisted work within the BPI Automation Team. Follow them on every task unless the user explicitly overrides a specific rule for that task.
+
+## 1. Languages
+
+- Python and SQL are the defaults. Use them unless the user explicitly requests another language.
+- Target **Python 3.13 or later**.
+- Use the SQL dialect appropriate to the target engine (T-SQL for MSSQL, MySQL dialect for Sugar).
+- If the user explicitly requests another language for a task (PowerShell, VBA, Node-RED, JavaScript, etc.), follow that request, but still apply the rest of these rules where they translate (no hardcoded credentials, structured logging, config-driven paths, CLAUDE.md maintained, branding respected).
+
+## 2. Databases and Connections
+
+### Connection method
+- Always use **`pyodbc`** for database connections, for both MSSQL and MySQL targets.
+- All connections are **trusted connections**. Do not include usernames, passwords, or credential prompts in connection strings.
+- Always use **parameterised queries**. Never concatenate or f-string user-supplied values into SQL.
+- Always wrap connections in context managers so they close cleanly.
+
+### DSN reference
+
+| System          | DSN                  | Engine | Purpose                            |
+|-----------------|----------------------|--------|-------------------------------------|
+| Sugar           | `DSN=Sugar Corp`     | MySQL  | SugarCRM (live)                     |
+| Jupiter         | `DSN=Jupiter`        | MSSQL  | Jupiter on `emdb` (live)            |
+| Titan (DEV)     | `DSN=Titan_INSE_DEV` | MSSQL  | Development environment for Titan; new tables are built and tested here first |
+| Titan (PROD)    | `DSN=Titan_INSE`     | MSSQL  | Production environment for Titan    |
+
+Everything other than Sugar is MSSQL by default. New tables and schema changes are always built first against `Titan_INSE_DEV`. They are only promoted to `Titan_INSE` (PROD) via a migration script — see Section 4 below. If a new database is introduced, ask the user for the DSN and engine type and record it in CLAUDE.md.
+
+Example:
+```python
+import pyodbc
+
+with pyodbc.connect("DSN=Jupiter") as conn:
+    cursor = conn.cursor()
+    cursor.execute(
+        "SELECT TOP 10 * FROM dbo.SomeTable WHERE col = ?",
+        (value,),
+    )
+    rows = cursor.fetchall()
+```
+
+### Destructive statements
+For any `UPDATE`, `DELETE`, `DROP`, `TRUNCATE`, or `ALTER` statement, display the full statement and provide an explicit warning to the user that the statement is destructive and to proceed with caution.
+
+### Naming conventions
+- Follow existing prefix patterns in the target schema (for example, `spTENDER_` for tender-related stored procedures).
+- If unsure of the convention for a schema you have not touched before, ask the user.
+
+## 3. Project Structure
+
+Every project must follow this layout:
+
+```
+project_root/
+├── src/                          # Python source code
+├── config/
+│   ├── config.yaml               # Local config, never committed
+│   └── config.example.yaml       # Template with placeholder values
+├── migrations/                   # SQL migration scripts (see Section 4)
+├── CLAUDE.md                     # AI agent context (required)
+├── README.md                     # Human-readable project overview
+├── requirements.txt              # Pinned dependencies
+├── inspired-brand-guidelines.md  # Required only for user-facing work
+└── .gitignore
+```
+
+- Always create `requirements.txt` with exact pinned versions (`package==1.2.3`). Include `PyYAML` whenever config is read.
+- Where `pandas` is used, pin both `pandas` and `numpy` to the team's known-good versions in `requirements.txt`: `pandas==2.3.3` and `numpy==2.3.5`. These versions are tested together and should not be changed without team-wide agreement.
+- Always create or update `.gitignore` to exclude `config/config.yaml`, `__pycache__/`, `*.pyc`, and any local log output.
+- **No virtual environments are used in this team.** Do not create `venv/` directories or suggest virtualenv setup.
+
+## 4. Schema Changes and Migrations
+
+All database schema work follows a DEV-first, migrate-to-PROD pattern.
+
+### Workflow
+
+- New tables, columns, indexes, constraints, and stored procedures are built and tested against the DEV environment (e.g. `Titan_INSE_DEV`).
+- Once the design is settled, the canonical schema change is captured as a numbered SQL migration script in `migrations/`.
+- The migration is then run against the PROD environment (e.g. `Titan_INSE`) when ready to promote.
+
+### Migrations folder
+
+Every project that touches database schema has a `migrations/` folder at the project root containing numbered SQL files.
+
+```
+migrations/
+├── 001_create_initial_tables.sql
+├── 002_add_status_column_to_orders.sql
+├── 003_create_audit_log_table.sql
+└── ...
+```
+
+Rules for migration scripts:
+
+- File names follow the pattern `NNN_short_description.sql`, where `NNN` is a zero-padded sequence number starting at 001.
+- Each migration is a single logical change (one new table, one column added, one index, etc.).
+- Migrations must be **idempotent where possible**, so re-running them is safe. For MSSQL:
+  - Use `IF NOT EXISTS (SELECT 1 FROM sys.tables WHERE name = '...') CREATE TABLE ...`
+  - Use `IF COL_LENGTH('schema.table', 'column') IS NULL ALTER TABLE ... ADD ...`
+  - Use `IF OBJECT_ID('schema.proc') IS NULL ... ELSE ALTER` patterns for stored procedures
+- Migrations are never edited after they have been applied to any environment. To fix or change something, add a new migration.
+- DEV-only exploratory schema changes that are not intended to reach PROD should not be added as migrations. Once a change is finalised, write it up as a proper migration.
+
+### Tracking in CLAUDE.md
+
+The Migrations section of `CLAUDE.md` tracks which migrations have been applied to which environments. Example:
+
+```markdown
+## Migrations
+
+| File                                | DEV applied  | PROD applied |
+|-------------------------------------|--------------|--------------|
+| 001_create_initial_tables.sql       | 2026-01-15   | 2026-01-22   |
+| 002_add_status_column_to_orders.sql | 2026-02-10   | not yet      |
+```
+
+The AI agent updates this table whenever:
+- A new migration script is added (initial row, both columns "not yet")
+- The user reports applying a migration to an environment (update the relevant date)
+
+### When the AI agent makes schema changes
+
+Whenever the agent creates, modifies, or drops a schema object as part of a task:
+
+1. Add the SQL to a new numbered migration file in `migrations/`.
+2. Add a row to the Migrations table in `CLAUDE.md` with DEV/PROD "not yet".
+3. Note in the response that the migration has been written and needs to be applied to DEV first, then PROD when ready.
+
+## 5. CLAUDE.md (Required in Every Project)
+
+Every project must contain a `CLAUDE.md` file at the project root.
+
+- If it does not exist, **create it before doing any other work**.
+- Read CLAUDE.md at the start of every task and treat it as the source of truth for project context.
+- You (the AI agent) are responsible for keeping CLAUDE.md accurate. Update it whenever the project changes in any meaningful way, and add a Change Log entry.
+- If CLAUDE.md contradicts what you observe in the code, ask the user which is correct rather than guessing.
+
+### Required structure
+
+```markdown
+# CLAUDE.md
+
+## Purpose
+One or two sentences describing what this project does and the business problem it solves.
+
+## Tech Stack
+- Language(s) and version(s)
+- Key libraries and why they are used
+
+## Databases
+- DSNs used and which schemas, tables, and stored procedures are read from or written to
+- Any cross-database or linked server dependencies
+
+## External Integrations
+- APIs called (Graph, Freshservice, ECOES, etc.) and config keys required for each
+
+## Configuration
+- Code uses sensible defaults; `config/config.yaml` is optional.
+- `config.yaml` is required only if overriding defaults or storing secrets (Graph, Freshservice).
+- Default log root: `I:\BPI\Automation Team\Automated Processes\<project_name>\logs\...`
+
+## Migrations
+| File | DEV applied | PROD applied |
+|------|-------------|--------------|
+| _no migrations yet_ | | |
+
+## Key Business Logic
+- Domain rules, edge cases, and non-obvious decisions
+- Anything a new developer or agent would need to know to avoid breaking things
+
+## Known Gotchas
+- Quirks, workarounds, and things that have caused issues before
+
+## Change Log
+- YYYY-MM-DD: Brief description of change
+
+## Outstanding TODOs
+- Open items, in priority order
+```
+
+## 6. Configuration
+
+Configuration is split across two files, both loaded automatically by the shared library `automation-core` (see Section 8). Projects must not load these files directly.
+
+### Team-wide config (required, shared across all projects)
+
+Location: `\\inspiredenergysolutions.local\DFS\Public\!IE\BPI\Automation Team\Tools\Scripts\yaml\team.yaml`
+
+Holds credentials and team-wide defaults: Graph credentials, Freshservice credentials, default notification recipient, production root path. Rotated centrally; projects never copy or duplicate these values.
+
+### Project config (optional, per-project)
+
+Location: `config/config.yaml` in the project root.
+
+Used only to override team defaults for that specific project (e.g. notification method, custom log root, custom recipient). May be entirely absent; the library uses team defaults for anything not overridden.
+
+### Rules
+
+- Never load `team.yaml` or `config.yaml` directly from project code. Always go through `automation_core`.
+- Never hardcode credentials, API keys, or paths.
+- Commit `config.example.yaml` to each project showing what *can* be overridden, with every section commented out so the file is documentation rather than active config.
+- Never log secret values, even at debug level.
+
+## 7. Logging
+
+All logging setup is handled by the shared library `automation-core` (see Section 8). Projects must not configure logging directly.
+
+### How it works
+
+- `automation_core.setup(process_name)` configures logging with a file handler and a console handler. A single `logging.info(...)` call writes to both.
+- Log files are written to:
+  ```
+  <production_root>\<ProcessName>\logs\<YYYY>\<MonthName>\<DD>\<ProcessName>_<YYYYMMDD>_<HHMMSS>.log
+  ```
+  where `<production_root>` is `I:\BPI\Automation Team\Automated Processes` unless overridden in `config.yaml`.
+- The dated folder structure is created at runtime if it does not exist.
+- Format: `%(asctime)s | %(levelname)s | %(name)s | %(message)s`, UTF-8 encoded.
+
+### Rules
+
+- Always call `automation_core.setup(PROCESS_NAME)` at the start of `main()`. Never configure logging manually.
+- Use `logging.info()`, `logging.warning()`, `logging.error()`, etc. as normal once setup is done.
+- `print()` is permitted for casual ad-hoc output that does not need persisting (e.g. quick debugging). Operational events must go through `logging` so they land in the log file.
+- Use `logging.exception(...)` inside `except` blocks to capture the stack trace.
+
+## 8. Shared Library (`automation-core`)
+
+Every project depends on the shared library `automation-core`. It is the single source of truth for logging setup, configuration loading, error collection, and notification dispatch. The library lives at `github.com/Inspired-Automation/lib-core`.
+
+### Requirement
+
+Every project's `requirements.txt` must include the library at a pinned version, for example:
+
+```
+automation-core==1.0.0
+```
+
+It is installed from the GitHub repo:
+
+```
+pip install git+https://github.com/Inspired-Automation/lib-core.git@v1.0.0
+```
+
+### Standard usage in `main.py`
+
+```python
+from automation_core import setup, collect_errors
+
+PROCESS_NAME = "MyProcess"
+
+
+def main() -> None:
+    ctx = setup(PROCESS_NAME)
+    with collect_errors(ctx) as errors:
+        # project work
+        # for non-fatal issues:
+        #   errors.add("description", exception=exc)
+        # for critical issues:
+        #   raise normally; library handles notification
+        pass
+
+
+if __name__ == "__main__":
+    main()
+```
+
+Everything else (logging configuration, finding team.yaml, deciding whether to notify, sending the email or ticket) is handled inside the library. Projects must not reimplement any of this.
+
+## 9. Error Handling and Notifications
+
+The shared library distinguishes two error categories and handles them automatically.
+
+### Critical errors
+
+Errors that prevent the script completing. The pattern: let them raise. The library's `collect_errors` context manager catches uncaught exceptions, logs them with full traceback, sends an immediate critical-error notification, and re-raises so the process exits non-zero.
+
+### Non-fatal errors
+
+Errors that the script can recover from and continue past (e.g. one record in a batch fails). Use `errors.add(...)` to record them. The library:
+
+- Writes each one to the log file immediately (so they survive a later crash)
+- Holds them for a summary notification at the end of the run
+- Sends a single consolidated summary on normal exit, only if at least one was recorded
+
+### Notification rules
+
+- **No errors** → no notification sent.
+- **Critical error (uncaught exception)** → immediate notification with traceback.
+- **Non-fatal errors collected** → summary notification at end of run.
+- **Method:** email by default, or Freshservice ticket if `notifications.method: freshservice` is set in the project's `config.yaml`.
+- **Default recipient:** `bpiautomation@inspiredenergy.co.uk` (set in `team.yaml`), overridable per-project in `config.yaml`.
+
+### Development vs production behaviour
+
+- The library detects whether the script is running from the production root (`I:\BPI\Automation Team\Automated Processes\...`).
+- If yes: notifications are sent.
+- If no (developer running locally, in a clone elsewhere): notifications are suppressed. Errors still go to the log file and console.
+- Set `AUTOMATION_FORCE_NOTIFY=1` as an environment variable to override the suppression and send notifications even from a development location (useful for testing the notification pipeline).
+
+### Rules for the AI agent
+
+- Never reimplement notification logic. Always use the library.
+- For per-item processing loops, wrap the per-item work in `try/except` and call `errors.add()` on the recoverable cases. Let unexpected exceptions propagate.
+- For setup-time problems (missing config, can't reach a database, etc.), raise immediately. These are critical.
+- Never silently swallow exceptions with bare `except:` or `except Exception: pass`.
+
+## 10. Sending Email or Raising Tickets Outside Error Handling
+
+For business-purpose communications (e.g. a project sends a weekly summary email to a manager, or raises a ticket when a specific business event occurs):
+
+- Credentials are already in `team.yaml`, loaded by the library. The project does not need its own credentials.
+- If the library exposes a helper for sending custom email or creating tickets, use it.
+- If not yet available, ask the user how they would like to proceed before writing direct Graph or Freshservice API calls.
+- Confirm external recipients with the user before sending.
+- Do not send email automatically from any new script without explicit user sign-off on the first run.
+
+## 10. User-Facing Output (Branding)
+
+If a task involves anything a user or customer will see (emails, dashboards, PDFs, reports, web UIs, etc.), reference `inspired-brand-guidelines.md` from the project folder. If that file is not present, stop and ask the user to provide it before producing any user-facing output.
+
+## 11. Code Style and Output
+
+- Use type hints on function signatures.
+- Use `pathlib.Path` for filesystem paths, not `os.path`.
+- Wrap database, file I/O, and network calls in `try`/`except` with specific exception types. Never use bare `except:`.
+- Log exceptions with `logging.exception(...)` so the stack trace is captured.
+- All code must be **copy-paste ready**. No placeholder ellipses, no "rest of the function unchanged" shortcuts.
+- Do not use em-dashes anywhere in code, comments, docstrings, log messages, or written output.
+
+## 12. Agent Behaviour
+
+- Ask clarifying questions before making assumptions, especially about data shape, business rules, recipient lists, and target environments.
+- **Show, don't run.** When writing destructive SQL or terminal commands that the user will execute, display them clearly with explicit warnings about destructive effects. Cursor's agent in this team's workflow writes code for the user to run; it does not run SQL directly against project databases.
+- For multi-step tasks, summarise the full plan before starting, and check in with the user at meaningful milestones.
+- If the user provides a working query, script, or pattern, treat it as the canonical style for that project.
+- If unsure which DSN, schema, or table to use, ask rather than guess.

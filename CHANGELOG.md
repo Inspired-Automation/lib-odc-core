@@ -1,0 +1,65 @@
+# Changelog
+
+All notable changes to this project are documented in this file.
+
+The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
+and this project adheres to [Semantic Versioning](https://semver.org/).
+
+## [Unreleased]
+
+## [0.4.0] - 2026-07-30
+### Fixed
+- `file_save_as.save()` no longer pre-escapes apostrophes before binding them
+  as pyodbc query parameters. Values were being double-escaped, so a customer
+  name like `Sainsbury's` was stored in `ODC_scrape_data` as `Sainsbury''s`.
+  The `VOID` lookup used the same escaping, so both were changed together.
+- `graph_client._parse_otp_from_body()` returns `""` instead of the raw
+  remaining body text when no 4-8 digit group is found. Previously any email
+  containing `body_start` ended the poll loop and returned body text as if it
+  were the OTP; `read_otp_code()` now keeps polling.
+- Replaced two silent `except Exception: pass` blocks in `browser_helpers`
+  with `logger.debug(..., exc_info=True)`, per team-instructions section 11.
+### Changed
+- Runtime dependencies use minimum-version floors (`pyodbc>=5.3`, `msal>=1.31`,
+  `requests>=2.32`) instead of exact pins, matching `lib-core`. Exact pinning
+  belongs in the consuming supplier project's `requirements.txt`.
+- Added `from __future__ import annotations` to all nine modules and completed
+  the type hints on `jobstodo.get_multi_credentials()`.
+- `__all__` no longer lists `__version__`, matching `automation_core`.
+### Added
+- `lib-odc-core-spec.md` - canonical functional/technical spec, mirroring
+  `lib-core-spec.md`. `RELEASING.md` now requires keeping it current.
+- `CLAUDE.md` `## Migrations` section (required by team-instructions section 5)
+  and four new `## Known Gotchas` entries.
+- `.cursor/team-instructions.mdc`, copied from `lib-core`.
+- Test coverage for `browser_helpers.take_error_screenshot()` and
+  `move_mouse_toward()`; hardened the OTP timeout test against a brittle
+  fixed `time.time()` sequence.
+
+## [0.3.0] - 2026-07-30
+### Changed
+- Migrated package layout to `src/odc_core` (setuptools `src`-layout), matching
+  `lib-core`/`automation_core`. Import path (`import odc_core`) is unchanged.
+- Added `__version__` to `odc_core/__init__.py`, kept in sync with `pyproject.toml`.
+- Added `[project.optional-dependencies] dev` (`pytest`, `pytest-mock`) and
+  `[tool.pytest.ini_options]` to `pyproject.toml`.
+### Added
+- Full `pytest` suite under `tests/` covering all 9 modules, mocking
+  `pyodbc`/`requests`/`msal`/Playwright at the call site (no real DB/HTTP/browser).
+- `RELEASING.md` manual release runbook, mirroring `lib-core`'s.
+
+## [0.2.0] - 2026-07-29
+### Added
+- `duplicate_check.py` - fuller "already downloaded" check, with an
+  `inspired plc` branch cross-checking `ODC_scrape_accounts`/`web_scrape_data`.
+- `validate_username.py` - basic username sanity check before login.
+### Removed
+- Wave's `file_save_as.is_already_downloaded()` (a narrower duplicate of
+  `duplicate_check.is_duplicate()`), removed in favour of the new module.
+
+## [0.1.0] - 2026-07-29
+### Added
+- Package created, porting `shared_resources/` from the legacy
+  `supplier_web_scrape` Automation Anywhere framework into an installable,
+  config-driven library: `jobstodo`, `file_allocation`, `file_save_as`,
+  `updatejobdetails`, `graph_client`, `browser_helpers`, `pdf_auto_copy`.
