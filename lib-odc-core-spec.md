@@ -11,7 +11,7 @@ summarise this document; where they disagree, this document is correct.
 
 | Item | Value |
 |------|-------|
-| Repository | `https://github.com/Inspired-Automation/lib-odc-core` |
+| Repository | `https://github.com/InspiredAutomation/lib-odc-core` |
 | Distribution name | `odc-core` |
 | Import name | `odc_core` |
 | Layout | src-layout (`src/odc_core/`) |
@@ -22,7 +22,7 @@ summarise this document; where they disagree, this document is correct.
 Consuming supplier projects pin an exact release in their own `requirements.txt`:
 
 ```
-odc-core @ https://github.com/Inspired-Automation/lib-odc-core/releases/download/vX.Y.Z/odc_core-X.Y.Z-py3-none-any.whl
+odc-core @ https://github.com/InspiredAutomation/lib-odc-core/releases/download/vX.Y.Z/odc_core-X.Y.Z-py3-none-any.whl
 ```
 
 This library declares dependency *floors* rather than exact pins so it does not

@@ -107,9 +107,11 @@ This is a library, not a Control Room bot - it has no entry point of its own.
   database, and `graph_client._parse_otp_from_body()` returned raw body text
   as if it were an OTP when no digit group matched. Added
   `lib-odc-core-spec.md` and this `## Migrations` section.
+- 2026-07-30: repo pushed to `github.com/InspiredAutomation/lib-odc-core`
+  (note: no hyphen in the org name - earlier docs had `Inspired-Automation`,
+  which does not exist and made the documented `pip install` URLs 404).
 
 ## Outstanding TODOs
-- Push this repo to `Inspired-Automation/lib-odc-core` on GitHub.
 - Cut a `v0.4.0` release with the built wheel attached, matching the
   `lib-core` release flow (see RELEASING.md).
 - Once released, pin it in each supplier project's `requirements.txt`.
