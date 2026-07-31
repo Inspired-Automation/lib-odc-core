@@ -29,19 +29,19 @@ CI/CD - every step below is done by hand.
    py -m build --wheel --outdir dist
    ```
    This produces `dist\odc_core-X.Y.Z-py3-none-any.whl`.
-8. Draft a GitHub Release on `InspiredAutomation/lib-odc-core` at tag
+8. Draft a GitHub Release on `Inspired-Automation/lib-odc-core` at tag
    `vX.Y.Z`, title `vX.Y.Z`, description = the matching CHANGELOG block,
    **attach the built wheel as a release asset** (required - installing by
    the release wheel URL 404s otherwise), mark "latest", publish.
 9. Post-release verification:
    - Release page shows the wheel asset.
-   - `pip install git+https://github.com/InspiredAutomation/lib-odc-core.git@vX.Y.Z`
+   - `pip install git+https://github.com/Inspired-Automation/lib-odc-core.git@vX.Y.Z`
      succeeds and `python -c "import odc_core; print(odc_core.__version__)"`
      prints the new version.
    - Installing the wheel URL directly also succeeds.
 10. Pin the new release in each supplier project's `requirements.txt`:
     ```
-    odc-core @ https://github.com/InspiredAutomation/lib-odc-core/releases/download/vX.Y.Z/odc_core-X.Y.Z-py3-none-any.whl
+    odc-core @ https://github.com/Inspired-Automation/lib-odc-core/releases/download/vX.Y.Z/odc_core-X.Y.Z-py3-none-any.whl
     ```
 
 ## Versioning

@@ -18,7 +18,7 @@ dependencies = [
 ]
 
 [project.urls]
-Repository = "https://github.com/InspiredAutomation/lib-odc-core"
+Repository = "https://github.com/Inspired-Automation/lib-odc-core"
 
 [project.optional-dependencies]
 dev = ["pytest>=8.0", "pytest-mock>=3.12"]

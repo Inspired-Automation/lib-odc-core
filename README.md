@@ -11,13 +11,13 @@ GitHub release, not published to PyPI.
 Pin a released version in the consuming project's `requirements.txt`:
 
 ```
-odc-core @ https://github.com/InspiredAutomation/lib-odc-core/releases/download/vX.Y.Z/odc_core-X.Y.Z-py3-none-any.whl
+odc-core @ https://github.com/Inspired-Automation/lib-odc-core/releases/download/vX.Y.Z/odc_core-X.Y.Z-py3-none-any.whl
 ```
 
 or by git tag:
 
 ```
-odc-core @ git+https://github.com/InspiredAutomation/lib-odc-core.git@vX.Y.Z
+odc-core @ git+https://github.com/Inspired-Automation/lib-odc-core.git@vX.Y.Z
 ```
 
 ## Usage
