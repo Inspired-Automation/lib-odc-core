@@ -9,6 +9,7 @@ Never hardcode these values in source. ``sender_address`` is only used by
 
 from __future__ import annotations
 
+import html
 import logging
 import re
 import time
@@ -72,6 +73,16 @@ def send_mail(config: dict, recipient: str, subject: str, body: str) -> None:
 
 
 def _parse_otp_from_body(body: str, *, body_start: str, body_end: str) -> str:
+    # Strip markup first. Graph is asked for a text body, but if it returns HTML
+    # anyway the digits inside inline styles sit between the marker and the code:
+    # `Your one-time code is: ... <div style="color:#202020">965206</div>` made
+    # the digit search below return the hex colour 202020 instead of the code.
+    # Tags become a space, not "" - markers straddle tags and would otherwise fuse.
+    # Whitespace is then collapsed so a marker interrupted by tags
+    # ("Your one-time <b>code</b> is:") still matches the configured marker.
+    if "<" in body and ">" in body:
+        body = html.unescape(re.sub(r"<[^>]+>", " ", body))
+        body = re.sub(r"\s+", " ", body)
     if body_start not in body:
         return ""
     after = body.split(body_start, 1)[1]
@@ -102,7 +113,12 @@ def _list_recent_messages(
         f"?$filter={quote(filt)}&$orderby=receivedDateTime desc&$top=10"
         f"&$select=subject,body,receivedDateTime"
     )
-    headers = {"Authorization": f"Bearer {token}"}
+    # Ask for the plain-text body: the HTML alternative carries inline styles whose
+    # digits can shadow the OTP (see _parse_otp_from_body).
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Prefer": 'outlook.body-content-type="text"',
+    }
     response = requests.get(url, headers=headers, timeout=30)
     if response.status_code != 200:
         logger.debug(

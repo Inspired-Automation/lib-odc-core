@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.4.1] - 2026-07-31
+### Fixed
+- `graph_client` no longer parses digits out of HTML markup as if they were the
+  OTP. Graph returns the HTML alternative of the OTP mail by default, and the
+  Wave code is wrapped in a styled element - `Your one-time code is: ... <div
+  style="color:#202020">965206</div>` - so the 4-8 digit search matched the hex
+  colour `202020` on **every** run and the portal rejected it as an invalid
+  code. `_list_recent_messages()` now sends
+  `Prefer: outlook.body-content-type="text"`, and `_parse_otp_from_body()`
+  strips tags, unescapes entities and collapses whitespace before matching, so
+  it is correct even if an HTML body arrives anyway (and tolerates a marker
+  broken across tags).
+
 ## [0.4.0] - 2026-07-30
 ### Fixed
 - `file_save_as.save()` no longer pre-escapes apostrophes before binding them
