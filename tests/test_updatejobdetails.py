@@ -7,7 +7,7 @@ from odc_core import updatejobdetails
 TABLES = {"db_name": "Titan_INSE"}
 
 
-@patch("odc_core.updatejobdetails.pyodbc.connect")
+@patch("odc_core.db.pyodbc.connect")
 def test_update_valid_status_executes_and_commits(mock_connect):
     cursor = MagicMock()
     conn = MagicMock()
@@ -23,7 +23,7 @@ def test_update_valid_status_executes_and_commits(mock_connect):
     conn.commit.assert_called_once()
 
 
-@patch("odc_core.updatejobdetails.pyodbc.connect")
+@patch("odc_core.db.pyodbc.connect")
 def test_update_invalid_status_raises_without_connecting(mock_connect):
     with pytest.raises(ValueError):
         updatejobdetails.update("DETAIL1", "BOGUS", False, TABLES, "Jupiter")

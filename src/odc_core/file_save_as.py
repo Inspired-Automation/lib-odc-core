@@ -6,7 +6,7 @@ import logging
 import shutil
 from pathlib import Path
 
-import pyodbc
+from . import db
 
 logger = logging.getLogger(__name__)
 
@@ -78,7 +78,7 @@ def save(
     # Values are bound as query parameters, so pyodbc handles quoting. Do not
     # pre-escape apostrophes here: that would double-escape and store the
     # literal doubled quote (e.g. "Sainsbury''s") in the database.
-    with pyodbc.connect(f"DSN={dsn}") as conn:
+    def work(conn) -> None:
         cursor = conn.cursor()
         cursor.execute(
             insert_sql,
@@ -106,5 +106,9 @@ def save(
             logger.warning(
                 "FILE_SAVE_AS - file marked VOID (< 1 KB): %s", target_path
             )
+
+    # The shutil.move above stays outside the retry: only the insert is replayed,
+    # and a transient SQLSTATE means it was never committed, so no duplicate row.
+    db.run(dsn, work, description=f"file_save_as.save({complete_filename})")
 
     return True

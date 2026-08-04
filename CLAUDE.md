@@ -61,15 +61,25 @@ This is a library, not a Control Room bot - it has no entry point of its own.
   (checks `scrape_accounts`/`web_scrape_data` too) than every other client.
 - Status vocabulary shared across all suppliers: `DOWNLOADED`,
   `PARTIALLY DOWNLOADED`, `NOT REQUIRED`, `NOT FOUND`, `ERROR`, `FAILED`,
-  `IN PROGRESS`, `FOUND`.
+  `IN PROGRESS`, `FOUND`. `NOT FOUND` is a business fact: the portal answered
+  and the account or document is absent. A timeout is `ERROR`. Suppliers must not
+  collapse the two.
+- All MSSQL access goes through `db.run(dsn, work)`, which retries the unit of
+  work on the transient SQLSTATEs in `db.TRANSIENT_SQLSTATES` and lets every
+  other error surface on the first attempt. Replaying is safe for the units in
+  this package because a transient SQLSTATE means nothing was committed; check
+  that before wrapping a partially-committed multi-statement unit.
 
 ## Known Gotchas
 - The original per-supplier framework hardcoded Graph `client_id`/`client_secret`/
   `tenant_id` directly in source (`graph_otp.py`, `mailer.py`). This package
   fixes that: credentials always come from the caller's `config["graph"]`.
-- `pyodbc`'s connection context manager commits/rolls back on exit but does
-  not close the connection; this matches the team's own documented example
-  (team-instructions.mdc Section 2) and is intentional, not an oversight.
+- `db.run()` closes the connection it opened, so a `work()` callable that
+  mutates data must `conn.commit()` itself. The modules here all do. This
+  differs from the bare `with pyodbc.connect(...)` these modules used before
+  0.5.0, which committed on exit and left the connection open.
+- Tests for the DB modules patch `odc_core.db.pyodbc.connect`, not each module's
+  own `pyodbc`: those modules no longer import it.
 - `file_save_as.save()` still accepts a `folder_location` argument that it
   never reads (the target directory is derived from `target_path`). Left in
   place because removing it breaks every caller's signature; drop it at the
@@ -87,6 +97,16 @@ This is a library, not a Control Room bot - it has no entry point of its own.
   Linux. Fine for Control Room bots; worth knowing before any container move.
 
 ## Change Log
+- 2026-08-04: v0.5.0 - added the `db` module and routed `jobstodo`,
+  `duplicate_check`, `updatejobdetails` and `file_save_as` through it, so a
+  momentary DBNETLIB drop no longer costs whatever account was in flight. On
+  2026-08-02 a Pozitive Energy run lost accounts to `('08001', ... SQL Server
+  does not exist or access denied ... ConnectionOpen (Connect()))` inside
+  `duplicate_check.is_duplicate()` and to `('HYT00', ... Login timeout expired)`
+  inside `updatejobdetails.update()`, with no retry anywhere in the stack. Only
+  the SQLSTATEs in `db.TRANSIENT_SQLSTATES` retry; a syntax error or constraint
+  violation still surfaces immediately. Also fixed `__init__.__version__`, which
+  had been left at `0.4.0` while `pyproject.toml` said `0.4.1`.
 - 2026-07-29: Package created, porting `shared_resources/` from the legacy
   `supplier_web_scrape` Automation Anywhere framework into an installable,
   config-driven library for use by Control Room ODC supplier projects.
@@ -113,8 +133,12 @@ This is a library, not a Control Room bot - it has no entry point of its own.
   does not exist and made the documented `pip install` URLs 404).
 
 ## Outstanding TODOs
-- Cut a `v0.4.0` release with the built wheel attached, matching the
-  `lib-core` release flow (see RELEASING.md).
+- Cut a `v0.5.0` release with the built wheel attached, matching the
+  `lib-core` release flow (see RELEASING.md). Note the `0.4.1` tag was pushed as
+  `v.0.4.1` with a stray dot while consumers pin `v0.4.1`; tag this one `v0.5.0`.
 - Once released, pin it in each supplier project's `requirements.txt`.
+  `automation-odc-pozitive-energy` already pins `v0.5.0` and needs it to run.
+  Crown (`0.4.0`) and Wave (`0.4.1`) should be moved up too: both share the
+  transient-DB exposure this release fixes.
 - Remove the unused `folder_location` parameter from `file_save_as.save()`
   at the next MAJOR version.

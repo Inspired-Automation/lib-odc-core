@@ -13,6 +13,7 @@ used across ODC_job_details.status / updatejobdetails.update():
 
 from . import (
     browser_helpers,
+    db,
     duplicate_check,
     file_allocation,
     file_save_as,
@@ -23,10 +24,11 @@ from . import (
     validate_username,
 )
 
-__version__ = "0.4.0"
+__version__ = "0.5.0"
 
 __all__ = [
     "browser_helpers",
+    "db",
     "duplicate_check",
     "file_allocation",
     "file_save_as",

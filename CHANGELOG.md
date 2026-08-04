@@ -7,6 +7,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-08-04
+### Added
+- New `db` module: `db.run(dsn, work)` opens a trusted DSN connection, runs a
+  unit of work and retries it on transient SQLSTATEs only (`08001`, `08S01`,
+  `HYT00`, `HYT01`, `40001`), 4 attempts with 1s/3s/9s backoff. `db.connect(dsn)`
+  is a context manager that retries just the connect, for callers that cannot
+  express their work as a replayable callable. Anything else, a syntax error or
+  a constraint violation, still surfaces on the first attempt.
+### Changed
+- `jobstodo`, `duplicate_check`, `updatejobdetails` and `file_save_as` now go
+  through `db.run()` instead of calling `pyodbc.connect()` directly. Every ODC
+  bot runs for hours against Jupiter over the corporate network, so a momentary
+  DBNETLIB drop used to cost whatever account was in flight: on 2026-08-02 a
+  Pozitive Energy run lost accounts to `('08001', ... SQL Server does not exist
+  or access denied ... ConnectionOpen (Connect()))` raised inside
+  `duplicate_check.is_duplicate()`, and to `('HYT00', ... Login timeout
+  expired)` raised inside `updatejobdetails.update()`. Replaying these units is
+  safe: a transient SQLSTATE means nothing was committed, and `file_save_as`
+  keeps its `shutil.move` outside the retry so only the insert is replayed.
+- `__init__.__version__` was left at `0.4.0` while `pyproject.toml` said
+  `0.4.1`; both now read `0.5.0`.
+- Tests for the four DB modules patch `odc_core.db.pyodbc.connect` rather than
+  each module's own `pyodbc`, which those modules no longer import.
+
 ## [0.4.1] - 2026-07-31
 ### Fixed
 - `graph_client` no longer parses digits out of HTML markup as if they were the

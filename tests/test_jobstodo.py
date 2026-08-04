@@ -29,7 +29,7 @@ def test_is_multi_credential_job_none_values():
     assert jobstodo.is_multi_credential_job(None, None) is False
 
 
-@patch("odc_core.jobstodo.pyodbc.connect")
+@patch("odc_core.db.pyodbc.connect")
 def test_is_job_claimed_true(mock_connect):
     cursor = MagicMock()
     cursor.fetchone.return_value = ("PROC1",)
@@ -38,7 +38,7 @@ def test_is_job_claimed_true(mock_connect):
     assert jobstodo.is_job_claimed("JOB1", TABLES, "Jupiter") is True
 
 
-@patch("odc_core.jobstodo.pyodbc.connect")
+@patch("odc_core.db.pyodbc.connect")
 def test_is_job_claimed_false_when_no_row(mock_connect):
     cursor = MagicMock()
     cursor.fetchone.return_value = None
@@ -47,7 +47,7 @@ def test_is_job_claimed_false_when_no_row(mock_connect):
     assert jobstodo.is_job_claimed("JOB1", TABLES, "Jupiter") is False
 
 
-@patch("odc_core.jobstodo.pyodbc.connect")
+@patch("odc_core.db.pyodbc.connect")
 def test_get_client_location_returns_value(mock_connect):
     cursor = MagicMock()
     cursor.fetchone.return_value = ("SiteA",)
@@ -56,7 +56,7 @@ def test_get_client_location_returns_value(mock_connect):
     assert jobstodo.get_client_location("JOB1", TABLES, "Jupiter") == "SiteA"
 
 
-@patch("odc_core.jobstodo.pyodbc.connect")
+@patch("odc_core.db.pyodbc.connect")
 def test_get_client_location_returns_none_when_missing(mock_connect):
     cursor = MagicMock()
     cursor.fetchone.return_value = None
@@ -65,7 +65,7 @@ def test_get_client_location_returns_none_when_missing(mock_connect):
     assert jobstodo.get_client_location("JOB1", TABLES, "Jupiter") is None
 
 
-@patch("odc_core.jobstodo.pyodbc.connect")
+@patch("odc_core.db.pyodbc.connect")
 def test_get_job_details_single_credential_pending_only(mock_connect):
     cursor = MagicMock()
     cursor.fetchone.return_value = ("jdoe", "secret")
@@ -84,7 +84,7 @@ def test_get_job_details_single_credential_pending_only(mock_connect):
     assert any("pending" in sql for sql in executed_sql)
 
 
-@patch("odc_core.jobstodo.pyodbc.connect")
+@patch("odc_core.db.pyodbc.connect")
 def test_get_job_details_multi_credential_job(mock_connect):
     cursor = MagicMock()
     cursor.fetchone.return_value = ("multi_credential", "multi_credential")
@@ -99,7 +99,7 @@ def test_get_job_details_multi_credential_job(mock_connect):
     assert any("NOT IN" in sql for sql in executed_sql)
 
 
-@patch("odc_core.jobstodo.pyodbc.connect")
+@patch("odc_core.db.pyodbc.connect")
 def test_get_job_details_no_job_row_returns_empty(mock_connect):
     cursor = MagicMock()
     cursor.fetchone.return_value = None
@@ -108,7 +108,7 @@ def test_get_job_details_no_job_row_returns_empty(mock_connect):
     assert jobstodo.get_job_details("PROC1", "JOB1", TABLES, "Jupiter") == []
 
 
-@patch("odc_core.jobstodo.pyodbc.connect")
+@patch("odc_core.db.pyodbc.connect")
 def test_get_multi_credentials(mock_connect):
     cursor = MagicMock()
     cursor.description = [("username",), ("password",), ("url",)]
@@ -120,7 +120,7 @@ def test_get_multi_credentials(mock_connect):
     assert rows == [{"username": "u1", "password": "p1", "url": "http://x"}]
 
 
-@patch("odc_core.jobstodo.pyodbc.connect")
+@patch("odc_core.db.pyodbc.connect")
 def test_revert_to_pending_commits(mock_connect):
     cursor = MagicMock()
     conn = _connect_mock(cursor)
@@ -132,7 +132,7 @@ def test_revert_to_pending_commits(mock_connect):
     conn.commit.assert_called_once()
 
 
-@patch("odc_core.jobstodo.pyodbc.connect")
+@patch("odc_core.db.pyodbc.connect")
 def test_clear_job_claim_commits(mock_connect):
     cursor = MagicMock()
     conn = _connect_mock(cursor)

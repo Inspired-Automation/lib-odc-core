@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 
-import pyodbc
+from . import db
 
 logger = logging.getLogger(__name__)
 
@@ -85,7 +85,8 @@ _CLEAR_PROCESS_ID = "UPDATE {jobs} SET process_id = NULL WHERE id = ?"
 def is_job_claimed(job_id: str, tables: dict, dsn: str) -> bool:
     """Return True if ODC_jobs.process_id is already set for this job_id."""
     sql = _SELECT_PROCESS_ID.format(jobs=tables["jobs"])
-    with pyodbc.connect(f"DSN={dsn}") as conn:
+
+    def work(conn) -> bool:
         cursor = conn.cursor()
         cursor.execute(sql, job_id)
         row = cursor.fetchone()
@@ -93,17 +94,22 @@ def is_job_claimed(job_id: str, tables: dict, dsn: str) -> bool:
             return False
         return bool(row[0])
 
+    return db.run(dsn, work, description=f"jobstodo.is_job_claimed({job_id})")
+
 
 def get_client_location(job_id: str, tables: dict, dsn: str) -> str | None:
     """Return client_location for job_id, or None if the job row is missing."""
     sql = _SELECT_CLIENT_LOCATION.format(jobs=tables["jobs"])
-    with pyodbc.connect(f"DSN={dsn}") as conn:
+
+    def work(conn) -> str | None:
         cursor = conn.cursor()
         cursor.execute(sql, job_id)
         row = cursor.fetchone()
         if row is None:
             return None
         return row[0] or ""
+
+    return db.run(dsn, work, description=f"jobstodo.get_client_location({job_id})")
 
 
 def is_multi_credential_job(username: str | None, password: str | None) -> bool:
@@ -131,7 +137,7 @@ def get_job_details(
     update_sql = _UPDATE_PROCESS_ID.format(jobs=tables["jobs"])
     cred_sql = _SELECT_JOB_CREDENTIALS.format(jobs=tables["jobs"])
 
-    with pyodbc.connect(f"DSN={dsn}") as conn:
+    def work(conn) -> list[dict]:
         cursor = conn.cursor()
 
         logger.debug("JOBSTODO - stamping process_id %s on job %s", process_id, job_id)
@@ -166,6 +172,10 @@ def get_job_details(
         logger.debug("JOBSTODO - found %d %s row(s) for job %s", len(rows), mode_label, job_id)
         return rows
 
+    # Replaying this is safe: the process_id stamp is the same value every time,
+    # and a transient SQLSTATE means it was never committed.
+    return db.run(dsn, work, description=f"jobstodo.get_job_details({job_id})")
+
 
 def get_multi_credentials(
     client_id: str,
@@ -178,7 +188,7 @@ def get_multi_credentials(
         multi_credential=tables["multi_credential"],
         credential=tables["credential"],
     )
-    with pyodbc.connect(f"DSN={dsn}") as conn:
+    def work(conn) -> list[dict]:
         cursor = conn.cursor()
         cursor.execute(sql, client_id, supplier_id)
         columns = [col[0] for col in cursor.description]
@@ -189,22 +199,31 @@ def get_multi_credentials(
         )
         return rows
 
+    return db.run(
+        dsn, work,
+        description=f"jobstodo.get_multi_credentials({client_id}/{supplier_id})",
+    )
+
 
 def revert_to_pending(job_detail_id: str, tables: dict, dsn: str) -> None:
     """Reset a job_details row to pending (used between credential attempts)."""
     sql = _REVERT_TO_PENDING.format(job_details=tables["job_details"])
-    with pyodbc.connect(f"DSN={dsn}") as conn:
+    def work(conn) -> None:
         cursor = conn.cursor()
         cursor.execute(sql, job_detail_id)
         conn.commit()
         logger.debug("JOBSTODO - reverted job_details %s to pending", job_detail_id)
 
+    db.run(dsn, work, description=f"jobstodo.revert_to_pending({job_detail_id})")
+
 
 def clear_job_claim(job_id: str, tables: dict, dsn: str) -> None:
     """Clear the process_id on ODC_jobs so the job can be retried."""
     sql = _CLEAR_PROCESS_ID.format(jobs=tables["jobs"])
-    with pyodbc.connect(f"DSN={dsn}") as conn:
+    def work(conn) -> None:
         cursor = conn.cursor()
         cursor.execute(sql, job_id)
         conn.commit()
         logger.debug("JOBSTODO - cleared process_id claim for job %s", job_id)
+
+    db.run(dsn, work, description=f"jobstodo.clear_job_claim({job_id})")

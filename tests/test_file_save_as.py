@@ -36,7 +36,7 @@ def _save_kwargs(staging_path, target_path):
     )
 
 
-@patch("odc_core.file_save_as.pyodbc.connect")
+@patch("odc_core.db.pyodbc.connect")
 def test_save_normal_file_not_marked_void(mock_connect, tmp_path):
     staging = tmp_path / "staging.pdf"
     staging.write_bytes(b"x" * 2048)
@@ -53,7 +53,7 @@ def test_save_normal_file_not_marked_void(mock_connect, tmp_path):
     assert cursor.execute.call_count == 1  # only the INSERT, no VOID update
 
 
-@patch("odc_core.file_save_as.pyodbc.connect")
+@patch("odc_core.db.pyodbc.connect")
 def test_save_binds_raw_values_without_escaping_apostrophes(mock_connect, tmp_path):
     # pyodbc escapes bound parameters itself. Pre-escaping here would store the
     # literal doubled quote, so the values must reach execute() untouched.
@@ -76,7 +76,7 @@ def test_save_binds_raw_values_without_escaping_apostrophes(mock_connect, tmp_pa
     assert not any(isinstance(v, str) and "''" in v for v in bound)
 
 
-@patch("odc_core.file_save_as.pyodbc.connect")
+@patch("odc_core.db.pyodbc.connect")
 def test_save_small_file_marked_void(mock_connect, tmp_path):
     staging = tmp_path / "staging.pdf"
     staging.write_bytes(b"x" * 100)

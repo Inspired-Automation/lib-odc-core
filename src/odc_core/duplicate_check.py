@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import logging
 
-import pyodbc
+from . import db
 
 logger = logging.getLogger(__name__)
 
@@ -76,6 +76,8 @@ def is_duplicate(
         )
         params = (account_reference, supplier, client_name, unique_file_ref)
 
-    with pyodbc.connect(f"DSN={dsn}") as conn:
+    def work(conn) -> bool:
         row = conn.cursor().execute(sql, *params).fetchone()
         return bool(row and row[0])
+
+    return db.run(dsn, work, description="duplicate_check.is_duplicate")

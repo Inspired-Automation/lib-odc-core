@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 
-import pyodbc
+from . import db
 
 logger = logging.getLogger(__name__)
 
@@ -45,8 +45,10 @@ def update(
         job_detail_id, status, parent_flag,
     )
 
-    with pyodbc.connect(f"DSN={dsn}") as conn:
+    def work(conn) -> None:
         cursor = conn.cursor()
         cursor.execute(sql, job_detail_id, status, parent_flag)
         conn.commit()
         logger.debug("UPDATEJOBDETAILS - updated successfully")
+
+    db.run(dsn, work, description=f"updatejobdetails.update({job_detail_id})")

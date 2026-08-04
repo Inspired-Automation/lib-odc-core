@@ -20,7 +20,7 @@ def _connect_mock(row):
     return conn, cursor
 
 
-@patch("odc_core.duplicate_check.pyodbc.connect")
+@patch("odc_core.db.pyodbc.connect")
 def test_is_duplicate_standard_client_true(mock_connect):
     conn, cursor = _connect_mock((1,))
     mock_connect.return_value = conn
@@ -33,7 +33,7 @@ def test_is_duplicate_standard_client_true(mock_connect):
     assert "ODC_scrape_accounts" not in sql
 
 
-@patch("odc_core.duplicate_check.pyodbc.connect")
+@patch("odc_core.db.pyodbc.connect")
 def test_is_duplicate_standard_client_false(mock_connect):
     conn, _ = _connect_mock((0,))
     mock_connect.return_value = conn
@@ -43,7 +43,7 @@ def test_is_duplicate_standard_client_false(mock_connect):
     assert result is False
 
 
-@patch("odc_core.duplicate_check.pyodbc.connect")
+@patch("odc_core.db.pyodbc.connect")
 def test_is_duplicate_inspired_plc_uses_union_query(mock_connect):
     conn, cursor = _connect_mock((1,))
     mock_connect.return_value = conn
@@ -58,7 +58,7 @@ def test_is_duplicate_inspired_plc_uses_union_query(mock_connect):
     assert "ODC_scrape_accounts" in sql
 
 
-@patch("odc_core.duplicate_check.pyodbc.connect")
+@patch("odc_core.db.pyodbc.connect")
 def test_is_duplicate_no_row_returns_false(mock_connect):
     conn, _ = _connect_mock(None)
     mock_connect.return_value = conn

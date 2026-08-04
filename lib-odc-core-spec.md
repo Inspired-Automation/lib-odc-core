@@ -84,6 +84,7 @@ env: dev
 | Module | Requires |
 |--------|----------|
 | `jobstodo`, `file_save_as`, `duplicate_check`, `updatejobdetails` | `tables`, `dsn` (passed directly, not the whole config) |
+| `db` | `dsn` only (passed directly) |
 | `file_allocation` | `config["file_allocation"]` |
 | `graph_client` | `config["graph"]` |
 | `browser_helpers` | `config["delays"]`, plus `_logs_dir`/`_process_id`/`_supplier_name` for screenshots |
@@ -271,14 +272,43 @@ Locator or a CSS/text selector string. Pacing comes from `config["delays"]`.
 the run. It writes `{_process_id}_{_supplier_name}_{label}_{timestamp}.png` into
 `config["_logs_dir"]`.
 
+### 3.11 `db` - connection and transient-failure retry
+
+```python
+TRANSIENT_SQLSTATES: frozenset[str]   # 08001, 08S01, HYT00, HYT01, 40001
+sqlstate(exc: BaseException) -> str
+is_transient(exc: BaseException) -> bool
+run(dsn, work, *, description, attempts=4, base_delay_s=1.0) -> T
+connect(dsn, *, description, attempts=4, base_delay_s=1.0)  # context manager
+```
+
+The single entry point for MSSQL access in this library. `run()` opens a trusted
+DSN connection, calls `work(conn)`, closes the connection, and retries the whole
+unit on a fresh connection when the failure carries a transient SQLSTATE, with
+1s/3s/9s backoff. Anything else, a syntax error or a constraint violation,
+propagates on the first attempt: retrying those wastes the run and buries the
+cause.
+
+Every ODC bot runs for hours against Jupiter over the corporate network, so a
+momentary DBNETLIB drop is normal and used to cost whatever account was in
+flight. Replaying the units in this library is safe because a transient SQLSTATE
+means the connection or transaction failed, so nothing was committed, and `40001`
+is the deadlock victim which SQL Server has already rolled back. Do not wrap a
+partially-committed multi-statement unit in `run()` without checking that
+replaying it is idempotent.
+
+`connect()` retries only the connect and hands the caller a live handle, closing
+it on the way out. Prefer `run()`: a drop part way through a query is not covered
+by `connect()`, because by then the body of the `with` block is already running.
+
 ---
 
 ## 4. Database Contracts
 
-All access is via `pyodbc` with trusted connections (`DSN={dsn}`, no credentials
-in the connection string) and parameterised queries. Connections are wrapped in a
-context manager, which commits or rolls back on exit. Per team-instructions
-section 2 this does not close the connection, and that is intentional.
+All access goes through the `db` module: `pyodbc` with trusted connections
+(`DSN={dsn}`, no credentials in the connection string), parameterised queries, and
+retry on transient SQLSTATEs only. `db.run()` closes the connection it opened;
+callers that mutate data commit explicitly inside their `work(conn)` callable.
 
 | Object | Used by | Purpose |
 |--------|---------|---------|
@@ -313,6 +343,7 @@ for sub-1 KB downloads. `pending` (lowercase) is the pre-run state of a
 ```
 src/odc_core/
 ├── __init__.py            # module re-exports + __version__
+├── db.py                  # trusted DSN connect + transient-SQLSTATE retry
 ├── jobstodo.py            # claim a job, fetch job_details, multi-credential pool
 ├── duplicate_check.py     # pre-download "already have it?" guard
 ├── file_allocation.py     # target folder/filename convention
