@@ -137,8 +137,9 @@ This is a library, not a Control Room bot - it has no entry point of its own.
   `lib-core` release flow (see RELEASING.md). Note the `0.4.1` tag was pushed as
   `v.0.4.1` with a stray dot while consumers pin `v0.4.1`; tag this one `v0.5.0`.
 - Once released, pin it in each supplier project's `requirements.txt`.
-  `automation-odc-pozitive-energy` already pins `v0.5.0` and needs it to run.
-  Crown (`0.4.0`) and Wave (`0.4.1`) should be moved up too: both share the
-  transient-DB exposure this release fixes.
+  All nine `automation-odc-*` suppliers already pin `v0.5.0` in their
+  requirements (Pozitive, SSE, British Gas, Business Stream, Castle, Crown,
+  Source for Business, TotalEnergies, Wave). Cut the release so those pins
+  resolve.
 - Remove the unused `folder_location` parameter from `file_save_as.save()`
   at the next MAJOR version.

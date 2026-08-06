@@ -1,0 +1,9 @@
+{
+  "permissions": {
+    "allow": [
+      "PowerShell(gh release list --repo Inspired-Automation/lib-odc-core)",
+      "PowerShell(gh release view v.0.5.0 --repo Inspired-Automation/lib-odc-core --json tagName,assets)",
+      "PowerShell(try { $r = Invoke-RestMethod \"https://api.github.com/repos/Inspired-Automation/lib-odc-core/releases\" -Headers @{ 'User-Agent'='cc' }; $r | ForEach-Object { \"TAG=$\\($_.tag_name\\)  NAME=$\\($_.name\\)  draft=$\\($_.draft\\) prerelease=$\\($_.prerelease\\)\"; $_.assets | ForEach-Object { \"   asset: $\\($_.name\\)\" } } } catch { \"ERR: $\\($_.Exception.Message\\)\" })"
+    ]
+  }
+}
