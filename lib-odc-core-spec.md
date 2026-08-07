@@ -212,6 +212,15 @@ opening a connection if it does not match, then calls
 `{db_name}.dbo.spODC_job_details_UpdateStatus`. `update_parent_account` is sent
 to the proc as the string `"true"` or `"false"`.
 
+`REQUIRES RETRY` and `MISSING PARENT` (added in 0.6.0) are for suppliers with
+parent/child account grouping: `REQUIRES RETRY` marks a row that failed in a
+way that should not be treated as permanently `FAILED`/`ERROR`; `MISSING
+PARENT` marks a row searched under a parent account reference where the
+portal reports the actual document lives under a specific child account
+instead. Neither is re-fetched automatically by `jobstodo.get_job_details()`
+for a single-credential job (see 3.2) - only `pending` rows are re-queried,
+so something else must reset the row to `pending` if it needs to run again.
+
 ### 3.7 `graph_client` - Microsoft Graph
 
 ```python
@@ -329,7 +338,7 @@ Shared across every supplier. Written to `ODC_job_details.status` via
 
 ```
 DOWNLOADED, PARTIALLY DOWNLOADED, NOT REQUIRED, NOT FOUND, ERROR, FAILED,
-IN PROGRESS, FOUND
+IN PROGRESS, FOUND, REQUIRES RETRY, MISSING PARENT
 ```
 
 `ODC_scrape_data.status` additionally uses `VOID`, set by `file_save_as.save()`

@@ -61,9 +61,12 @@ This is a library, not a Control Room bot - it has no entry point of its own.
   (checks `scrape_accounts`/`web_scrape_data` too) than every other client.
 - Status vocabulary shared across all suppliers: `DOWNLOADED`,
   `PARTIALLY DOWNLOADED`, `NOT REQUIRED`, `NOT FOUND`, `ERROR`, `FAILED`,
-  `IN PROGRESS`, `FOUND`. `NOT FOUND` is a business fact: the portal answered
-  and the account or document is absent. A timeout is `ERROR`. Suppliers must not
-  collapse the two.
+  `IN PROGRESS`, `FOUND`, `REQUIRES RETRY`, `MISSING PARENT`. `NOT FOUND` is
+  a business fact: the portal answered and the account or document is
+  absent. A timeout is `ERROR`. Suppliers must not collapse the two.
+  `REQUIRES RETRY`/`MISSING PARENT` (added 0.6.0, for EDF Energy's
+  parent/child account grouping) are not re-fetched automatically - see
+  Known Gotchas.
 - All MSSQL access goes through `db.run(dsn, work)`, which retries the unit of
   work on the transient SQLSTATEs in `db.TRANSIENT_SQLSTATES` and lets every
   other error surface on the first attempt. Replaying is safe for the units in
@@ -95,8 +98,19 @@ This is a library, not a Control Room bot - it has no entry point of its own.
 - `file_allocation` writes `sugar_id.txt` with `encoding="ansi"`, which Python
   resolves to `mbcs`. That codec is Windows-only, so this module cannot run on
   Linux. Fine for Control Room bots; worth knowing before any container move.
+- `REQUIRES RETRY` and `MISSING PARENT` are validated by `VALID_STATUSES` and
+  written to the database, but nothing in the current estate resets a row in
+  either status back to `pending`. `jobstodo.get_job_details()` only
+  re-fetches `pending` rows for a single-credential job, so a supplier using
+  these two statuses to mean "try again on a later run" needs its own
+  reset mechanism (or to run as a multi-credential job, whose status filter
+  does not exclude them); today no such mechanism exists.
 
 ## Change Log
+- 2026-08-07: v0.6.0 - added `REQUIRES RETRY` and `MISSING PARENT` to
+  `updatejobdetails.VALID_STATUSES` for the EDF Energy port's parent/child
+  account grouping. See the new Known Gotchas entry: neither status is
+  automatically re-picked-up by `jobstodo.get_job_details()` today.
 - 2026-08-04: v0.5.0 - added the `db` module and routed `jobstodo`,
   `duplicate_check`, `updatejobdetails` and `file_save_as` through it, so a
   momentary DBNETLIB drop no longer costs whatever account was in flight. On
@@ -133,13 +147,16 @@ This is a library, not a Control Room bot - it has no entry point of its own.
   does not exist and made the documented `pip install` URLs 404).
 
 ## Outstanding TODOs
-- Cut a `v0.5.0` release with the built wheel attached, matching the
-  `lib-core` release flow (see RELEASING.md). Note the `0.4.1` tag was pushed as
-  `v.0.4.1` with a stray dot while consumers pin `v0.4.1`; tag this one `v0.5.0`.
-- Once released, pin it in each supplier project's `requirements.txt`.
-  All nine `automation-odc-*` suppliers already pin `v0.5.0` in their
-  requirements (Pozitive, SSE, British Gas, Business Stream, Castle, Crown,
-  Source for Business, TotalEnergies, Wave). Cut the release so those pins
-  resolve.
+- Cut a `v0.6.0` release with the built wheel attached, following
+  `RELEASING.md`. Only `automation-odc-edf-energy` needs to pin `v0.6.0`
+  (it is the only consumer of the two new statuses so far); every other
+  supplier stays on `v0.5.0`.
+- Verify `spODC_job_details_UpdateStatus` (Titan-owned, outside this repo)
+  does not itself reject `REQUIRES RETRY`/`MISSING PARENT` as unrecognised
+  status text before the EDF Energy bot relies on it in production.
+- Decide whether `REQUIRES RETRY`/`MISSING PARENT` need an actual retry
+  mechanism (a scheduled reset back to `pending`, or running affected jobs
+  as multi-credential) now that a real consumer (EDF Energy) exists, per
+  the Known Gotchas entry above.
 - Remove the unused `folder_location` parameter from `file_save_as.save()`
   at the next MAJOR version.

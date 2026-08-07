@@ -29,3 +29,20 @@ def test_update_invalid_status_raises_without_connecting(mock_connect):
         updatejobdetails.update("DETAIL1", "BOGUS", False, TABLES, "Jupiter")
 
     mock_connect.assert_not_called()
+
+
+@pytest.mark.parametrize("status", ["REQUIRES RETRY", "MISSING PARENT"])
+@patch("odc_core.db.pyodbc.connect")
+def test_update_accepts_parent_grouping_statuses(mock_connect, status):
+    cursor = MagicMock()
+    conn = MagicMock()
+    conn.__enter__.return_value = conn
+    conn.cursor.return_value = cursor
+    mock_connect.return_value = conn
+
+    updatejobdetails.update("DETAIL1", status, True, TABLES, "Jupiter")
+
+    cursor.execute.assert_called_once()
+    args = cursor.execute.call_args.args
+    assert args[1:] == ("DETAIL1", status, "true")
+    conn.commit.assert_called_once()

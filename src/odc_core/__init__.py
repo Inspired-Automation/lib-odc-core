@@ -8,7 +8,7 @@ allocation/save, job-status updates, or Microsoft Graph mail/OTP reading.
 Status vocabulary returned by a supplier's own search()/scrape function and
 used across ODC_job_details.status / updatejobdetails.update():
     DOWNLOADED, PARTIALLY DOWNLOADED, NOT REQUIRED, NOT FOUND, ERROR, FAILED,
-    IN PROGRESS, FOUND
+    IN PROGRESS, FOUND, REQUIRES RETRY, MISSING PARENT
 """
 
 from . import (
@@ -24,7 +24,7 @@ from . import (
     validate_username,
 )
 
-__version__ = "0.5.0"
+__version__ = "0.6.0"
 
 __all__ = [
     "browser_helpers",

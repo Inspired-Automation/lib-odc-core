@@ -75,8 +75,16 @@ Supplier projects' own scraping code returns one of these strings, used in
 
 ```
 DOWNLOADED, PARTIALLY DOWNLOADED, NOT REQUIRED, NOT FOUND, ERROR, FAILED,
-IN PROGRESS, FOUND
+IN PROGRESS, FOUND, REQUIRES RETRY, MISSING PARENT
 ```
+
+`REQUIRES RETRY` and `MISSING PARENT` were added for suppliers with
+parent/child account grouping (a business account umbrella reference that
+covers several `ODC_job_details` rows for individual meters). Note that
+`jobstodo.get_job_details()` only re-fetches `pending` rows for a
+single-credential job, so a row left in either of these two statuses is
+not automatically retried by a later run unless something else resets it
+back to `pending` first.
 
 ## Configuration
 

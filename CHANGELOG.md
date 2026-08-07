@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-08-07
+### Added
+- `updatejobdetails.VALID_STATUSES` gains `REQUIRES RETRY` and
+  `MISSING PARENT`, needed by the EDF Energy port's parent/child account
+  grouping (a parent reference umbrella covering several `ODC_job_details`
+  rows for individual meters). `REQUIRES RETRY` is for a failure that
+  should not be treated as permanently `FAILED`/`ERROR`; `MISSING PARENT`
+  is for a row searched under a parent account reference where the portal
+  says the actual document lives under a specific child account instead.
+  Neither is re-fetched automatically by `jobstodo.get_job_details()` for a
+  single-credential job - only `pending` rows are re-queried - so a caller
+  relying on either status being retried needs its own mechanism to reset
+  the row back to `pending`.
+
 ## [0.5.0] - 2026-08-04
 ### Added
 - New `db` module: `db.run(dsn, work)` opens a trusted DSN connection, runs a

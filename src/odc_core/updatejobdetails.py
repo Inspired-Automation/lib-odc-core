@@ -17,6 +17,8 @@ VALID_STATUSES = frozenset({
     "NOT REQUIRED",
     "FAILED",
     "ERROR",
+    "REQUIRES RETRY",
+    "MISSING PARENT",
 })
 
 _EXEC_SP = "EXEC {db_name}.dbo.spODC_job_details_UpdateStatus ?, ?, ?"
