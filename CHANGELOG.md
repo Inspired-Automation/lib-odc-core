@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-08-21
+### Fixed
+- Inspired PLC file allocation now names the company folder from the
+  SugarCRM account name resolved via `sug_internal_id`, instead of the
+  free-text `ODC_job_details.customer_name`. Two jobs for the same company
+  with differently-typed `customer_name` values used to land in two
+  different folders; they now land in the one SugarCRM-resolved folder.
+  `sugar_id.txt` is now seeded with the real id instead of being left empty.
+### Added
+- New `sugar_client` module: `get_company_name(sug_internal_id, dsn)` looks
+  up `accounts.NAME` in SugarCRM (`DSN=Sugar Corp`, MySQL) by internal id.
+- `jobstodo._SELECT_JOB_DETAILS` now inner-joins `scrape_accounts` on
+  `scrape_accounts_id` and returns `sug_internal_id`, for every client, not
+  just Inspired PLC. A `job_details` row with no matching `scrape_accounts`
+  row is now excluded from the result (previously included).
+- `file_allocation.allocate()` gains an optional `sug_internal_id` parameter
+  (default `None`, backward compatible) and falls back to the old
+  `customer_name`-keyed folder when it is absent, or when the caller's
+  config has no `sugar.dsn`, or when the SugarCRM lookup misses.
+- New config key `sugar.dsn` (see README "Expected config shape").
+
 ## [0.6.0] - 2026-08-07
 ### Added
 - `updatejobdetails.VALID_STATUSES` gains `REQUIRES RETRY` and

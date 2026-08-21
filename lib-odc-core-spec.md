@@ -62,6 +62,9 @@ graph:
   tenant_id:
   sender_address:
 
+sugar:
+  dsn: Sugar Corp
+
 delays:
   keystroke_min_ms: 50
   keystroke_max_ms: 150
@@ -85,7 +88,8 @@ env: dev
 |--------|----------|
 | `jobstodo`, `file_save_as`, `duplicate_check`, `updatejobdetails` | `tables`, `dsn` (passed directly, not the whole config) |
 | `db` | `dsn` only (passed directly) |
-| `file_allocation` | `config["file_allocation"]` |
+| `file_allocation` | `config["file_allocation"]`; for Inspired PLC also `config["sugar"]["dsn"]` and a `sug_internal_id` argument |
+| `sugar_client` | `dsn` only (passed directly) |
 | `graph_client` | `config["graph"]` |
 | `browser_helpers` | `config["delays"]`, plus `_logs_dir`/`_process_id`/`_supplier_name` for screenshots |
 | `pdf_auto_copy` | `config["env"]`, `config["pdf_auto"]["base_path"]` |
@@ -100,7 +104,7 @@ Graph credentials are never hardcoded in this package. A caller that omits
 
 ### 3.1 Shape of the API
 
-`odc_core/__init__.py` re-exports the nine **modules**, not their individual
+`odc_core/__init__.py` re-exports the ten **modules**, not their individual
 functions:
 
 ```python
@@ -140,7 +144,11 @@ It then branches on the job's own credentials:
   `NOT REQUIRED`, `PARTIALLY DOWNLOADED`, `NOT FOUND`.
 
 Returns `[]` when the job row does not exist. Each returned dict carries the
-joined `ODC_jobs` and `ODC_job_details` columns keyed by column name.
+joined `ODC_jobs` and `ODC_job_details` columns keyed by column name, plus
+`sug_internal_id` from an inner join to `ODC_scrape_accounts` on
+`scrape_accounts_id` (added 0.7.0, for every client, not just Inspired PLC).
+A `job_details` row with no matching `scrape_accounts` row is excluded from
+the result.
 
 ### 3.3 `duplicate_check` - pre-download guard
 
@@ -164,7 +172,7 @@ download entirely when it returns `True`.
 allocate(client_name, customer_name, account_reference, supplier,
          client_location, utility, meter_number, doc_type,
          bill_date_corrected, file_extension, invoice_number,
-         config: dict) -> dict
+         config: dict, sug_internal_id: str | None = None) -> dict
 ```
 
 Returns `{"folder_location": str, "complete_filename": str, "client_filepath": str}`
@@ -173,12 +181,32 @@ a side effect.
 
 | | Inspired PLC | Every other client |
 |---|---|---|
-| Folder | `{client_location}/{customer_name}/{INVOICE\|LETTER}/NEW/{utility}` | `{client_location}/{YYYY-MM}` |
+| Folder | `{client_location}/{company_name}/{INVOICE\|LETTER}/NEW/{utility}` | `{client_location}/{YYYY-MM}` |
 | Filename | `{supplier}_{account_reference}_{utility}_{invoice_number}_{YYYYMMDD}` | `{supplier}_{account_reference}_{meter_number}_{utility}_{invoice_number}_{YYYYMMDD}` |
-| Extra | Builds the full doc_type/status/utility tree and seeds `sugar_id.txt` | Creates the month folder only |
+| Extra | Builds the full doc_type/status/utility tree and seeds `sugar_id.txt` with `sug_internal_id` | Creates the month folder only |
 
 `doc_type == "O"` maps to `LETTER`; anything else maps to `INVOICE`. Utility is
 normalised to `Elec` or `Gas` by substring match, otherwise passed through.
+
+`company_name` (added 0.7.0) is resolved by calling
+`sugar_client.get_company_name(sug_internal_id, config["sugar"]["dsn"])` and
+falls back to the raw `customer_name` when `sug_internal_id` is `None`,
+`config["sugar"]["dsn"]` is absent, or the SugarCRM lookup finds no active
+account. This replaced keying the folder on `customer_name` directly, which
+let two job rows for the same company land in different folders if their
+free-text `customer_name` differed.
+
+### 3.4a `sugar_client` - SugarCRM account lookup
+
+```python
+get_company_name(sug_internal_id: str, dsn: str) -> str | None
+```
+
+Looks up `accounts.NAME` in SugarCRM (`DSN=Sugar Corp`, MySQL, not
+Titan/Jupiter) for the given internal id, filtered to `deleted = 0`. Returns
+`None` when no matching active account exists. Takes `dsn` directly rather
+than a `tables` dict: `accounts` is SugarCRM's own fixed schema table, not an
+ODC-owned table.
 
 ### 3.5 `file_save_as` - move and record
 
@@ -324,10 +352,11 @@ callers that mutate data commit explicitly inside their `work(conn)` callable.
 | `ODC_jobs` | `jobstodo`, `duplicate_check` | One row per supplier job. `process_id` is the claim marker. |
 | `ODC_job_details` | `jobstodo`, `duplicate_check`, `updatejobdetails` | One row per account to collect. Carries `status`. |
 | `ODC_scrape_data` | `file_save_as`, `duplicate_check` | One row per downloaded document. |
-| `ODC_scrape_accounts` | `duplicate_check` | Inspired PLC account pool. |
+| `ODC_scrape_accounts` | `jobstodo`, `duplicate_check` | Inspired PLC account pool; also the source of `sug_internal_id` for every client via `jobstodo.get_job_details()`. |
 | `ODC_multi_credentials`, `ODC_credentials` | `jobstodo` | Shared credential pool for multi-credential jobs. |
 | `jupiter.aa[_dev].web_scrape_data` | `duplicate_check` | Older parallel pipeline, consulted for Inspired PLC only. |
 | `spODC_job_details_UpdateStatus` | `updatejobdetails` | The only supported way to change a job_details status. |
+| SugarCRM `accounts` (`DSN=Sugar Corp`) | `sugar_client` | Resolves the Inspired PLC company name from `sug_internal_id`. Owned by SugarCRM, not Titan. |
 
 This library issues no DDL. Schema ownership sits with the Titan database.
 
@@ -358,6 +387,7 @@ src/odc_core/
 ├── file_allocation.py     # target folder/filename convention
 ├── file_save_as.py        # move file into place, insert scrape_data row
 ├── updatejobdetails.py    # spODC_job_details_UpdateStatus wrapper
+├── sugar_client.py        # SugarCRM account name lookup by internal id
 ├── graph_client.py        # Graph send_mail + read_otp_code
 ├── validate_username.py   # portal username sanity check
 ├── pdf_auto_copy.py       # copy into the PDF Auto drop folder

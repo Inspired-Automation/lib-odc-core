@@ -52,9 +52,11 @@ SELECT
     d.[parent_account_reference],
     d.[utility],
     d.[alternative_ref_1],
-    d.[status]
+    d.[status],
+    a.[sug_internal_id]
 FROM {jobs} AS j
 JOIN {job_details} AS d ON j.id = d.job_id
+JOIN {scrape_accounts} AS a ON d.[scrape_accounts_id] = a.[id]
 WHERE j.id = ?
   {status_filter}
 """
@@ -133,6 +135,11 @@ def get_job_details(
     Multi-credential jobs (username/password = ``multi_credential``):
     all rows except terminal statuses (DOWNLOADED, FOUND, FAILED, NOT REQUIRED,
     PARTIALLY DOWNLOADED, NOT FOUND).
+
+    Each row is inner-joined to `scrape_accounts` on `scrape_accounts_id`, so it
+    also carries `sug_internal_id` (the SugarCRM account id, used by
+    `file_allocation` to resolve the Inspired PLC company folder name). A
+    job_details row with no matching scrape_accounts row is excluded.
     """
     update_sql = _UPDATE_PROCESS_ID.format(jobs=tables["jobs"])
     cred_sql = _SELECT_JOB_CREDENTIALS.format(jobs=tables["jobs"])
@@ -157,6 +164,7 @@ def get_job_details(
         select_sql = _SELECT_JOB_DETAILS.format(
             jobs=tables["jobs"],
             job_details=tables["job_details"],
+            scrape_accounts=tables["scrape_accounts"],
             status_filter=status_filter,
         )
 

@@ -6,6 +6,8 @@ import logging
 from datetime import datetime
 from pathlib import Path
 
+from . import sugar_client
+
 logger = logging.getLogger(__name__)
 
 _INSPIRED_PLC = "inspired plc"
@@ -18,6 +20,43 @@ def _normalise_utility(utility: str) -> str:
     if "gas" in u_lower:
         return "Gas"
     return utility or ""
+
+
+def _resolve_inspired_company_name(
+    customer_name: str,
+    sug_internal_id: str | None,
+    config: dict,
+) -> str:
+    """Return the SugarCRM company name for an Inspired PLC customer.
+
+    Falls back to the raw `customer_name` when there is no sug_internal_id to
+    look up (older data) or no `config["sugar"]["dsn"]` (caller has not yet
+    pinned a release with a config.yaml `sugar:` block).
+    """
+    if not sug_internal_id:
+        logger.debug(
+            "FILE_ALLOCATION - no sug_internal_id for customer %r, "
+            "falling back to customer_name", customer_name,
+        )
+        return customer_name
+
+    sugar_dsn = config.get("sugar", {}).get("dsn")
+    if not sugar_dsn:
+        logger.debug(
+            "FILE_ALLOCATION - no config['sugar']['dsn'], "
+            "falling back to customer_name for %r", customer_name,
+        )
+        return customer_name
+
+    company_name = sugar_client.get_company_name(sug_internal_id, sugar_dsn)
+    if not company_name:
+        logger.warning(
+            "FILE_ALLOCATION - sug_internal_id %s not found in Sugar, "
+            "falling back to customer_name %r", sug_internal_id, customer_name,
+        )
+        return customer_name
+
+    return company_name
 
 
 def allocate(
@@ -33,9 +72,13 @@ def allocate(
     file_extension: str,
     invoice_number: str,
     config: dict,
+    sug_internal_id: str | None = None,
 ) -> dict:
     """
     Determine the full file path and folder structure for a downloaded invoice.
+
+    For Inspired PLC, the company folder is named from the SugarCRM account
+    resolved via `sug_internal_id`, not the free-text `customer_name`.
 
     Returns a dict with keys:
         folder_location   - directory where the file will be saved
@@ -48,10 +91,13 @@ def allocate(
 
     bill_date_yyyymmdd = (bill_date_corrected or "").replace("-", "")
 
-    if (client_name or "").lower() == _INSPIRED_PLC:
+    is_inspired = (client_name or "").lower() == _INSPIRED_PLC
+
+    if is_inspired:
+        company_name = _resolve_inspired_company_name(customer_name, sug_internal_id, config)
         folder = (
             Path(client_location)
-            / customer_name
+            / company_name
             / doc_type_str
             / "NEW"
             / normalised_utility
@@ -70,7 +116,12 @@ def allocate(
 
     client_filepath = folder / f"{filename}.{file_extension}"
 
-    _create_folder_structure(folder, client_name, client_location, customer_name, config)
+    if is_inspired:
+        _create_inspired_folder_structure(
+            client_location, company_name, sug_internal_id, config,
+        )
+    else:
+        folder.mkdir(parents=True, exist_ok=True)
 
     logger.debug(
         "FILE_ALLOCATION - folder: %s  file: %s.%s",
@@ -84,31 +135,27 @@ def allocate(
     }
 
 
-def _create_folder_structure(
-    base_folder: Path,
-    client_name: str,
+def _create_inspired_folder_structure(
     client_location: str,
-    customer_name: str,
+    company_name: str,
+    sug_internal_id: str | None,
     config: dict,
 ) -> None:
-    """Create the required directory tree."""
+    """Create the required directory tree for an Inspired PLC company."""
     fa = config.get("file_allocation", {})
 
-    if (client_name or "").lower() == _INSPIRED_PLC:
-        customer_root = Path(client_location) / customer_name
-        for dt in fa.get("doc_types", []):
-            for status in fa.get("statuses", []):
-                if status == "NEW":
-                    for util in fa.get("utilities", []):
-                        (customer_root / dt / status / util).mkdir(
-                            parents=True, exist_ok=True
-                        )
-                else:
-                    (customer_root / dt / status).mkdir(
+    customer_root = Path(client_location) / company_name
+    for dt in fa.get("doc_types", []):
+        for status in fa.get("statuses", []):
+            if status == "NEW":
+                for util in fa.get("utilities", []):
+                    (customer_root / dt / status / util).mkdir(
                         parents=True, exist_ok=True
                     )
-        sugar_id_file = customer_root / "sugar_id.txt"
-        if not sugar_id_file.exists():
-            sugar_id_file.write_text("", encoding="ansi")
-    else:
-        base_folder.mkdir(parents=True, exist_ok=True)
+            else:
+                (customer_root / dt / status).mkdir(
+                    parents=True, exist_ok=True
+                )
+    sugar_id_file = customer_root / "sugar_id.txt"
+    if not sugar_id_file.exists():
+        sugar_id_file.write_text(sug_internal_id or "", encoding="ansi")

@@ -43,9 +43,15 @@ for detail in job_details:
 ## What's in here
 
 - `jobstodo.py` - claim a job (`ODC_jobs.process_id`), fetch pending/searchable
-  `ODC_job_details` rows, revert/clear a claim, look up multi-credential rows.
+  `ODC_job_details` rows (joined to `ODC_scrape_accounts` for `sug_internal_id`),
+  revert/clear a claim, look up multi-credential rows.
 - `file_allocation.py` - work out the target folder/filename for a downloaded
-  invoice from `ODC_jobs`/`ODC_job_details` fields.
+  invoice from `ODC_jobs`/`ODC_job_details` fields. For Inspired PLC, resolves
+  the company folder name from SugarCRM via `sugar_client` and `sug_internal_id`
+  rather than trusting the free-text `customer_name`.
+- `sugar_client.py` - `get_company_name()`: look up a SugarCRM account name by
+  its internal id (`DSN=Sugar Corp`), used by `file_allocation` for Inspired
+  PLC folder naming.
 - `file_save_as.py` - move a downloaded file into place and insert the
   `ODC_scrape_data` row (marks it `VOID` if under 1 KB).
 - `duplicate_check.py` - `is_duplicate()`: has this invoice already been
@@ -105,6 +111,9 @@ graph:
   client_secret:
   tenant_id:
   sender_address:
+
+sugar:
+  dsn: Sugar Corp
 
 delays:
   keystroke_min_ms: 50

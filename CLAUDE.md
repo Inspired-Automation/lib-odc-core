@@ -23,6 +23,10 @@ This is a library, not a Control Room bot - it has no entry point of its own.
   `jupiter.aa_dev.web_scrape_data` / `jupiter.aa.web_scrape_data` (an older
   parallel pipeline consulted only for `client_name == "inspired plc"`
   duplicate checks), and the stored procedure `spODC_job_details_UpdateStatus`.
+- `sugar_client.py` (added 0.7.0) is the one module that talks to a second,
+  unrelated database: SugarCRM itself (`DSN=Sugar Corp`, MySQL), read-only,
+  looking up `accounts.NAME` by id. Not Titan, not Jupiter - a caller must
+  supply this DSN separately via `config["sugar"]["dsn"]`.
 
 ## External Integrations
 - Microsoft Graph (`graph_client.py`): `send_mail()` and `read_otp_code()`.
@@ -59,6 +63,14 @@ This is a library, not a Control Room bot - it has no entry point of its own.
   document, not after - callers skip the download entirely when it returns
   True. `client_name == "inspired plc"` accounts take a different query path
   (checks `scrape_accounts`/`web_scrape_data` too) than every other client.
+- File allocation for `client_name == "inspired plc"` (added 0.7.0) names the
+  company folder from the SugarCRM account name resolved via
+  `sug_internal_id` (fetched by `jobstodo.get_job_details()`'s join to
+  `ODC_scrape_accounts`), not from the free-text `ODC_job_details.customer_name`.
+  `file_allocation.allocate()` falls back to `customer_name` if
+  `sug_internal_id` is missing, `config["sugar"]["dsn"]` is not supplied, or
+  the SugarCRM lookup misses - so an unconfigured caller keeps the old
+  behaviour rather than erroring.
 - Status vocabulary shared across all suppliers: `DOWNLOADED`,
   `PARTIALLY DOWNLOADED`, `NOT REQUIRED`, `NOT FOUND`, `ERROR`, `FAILED`,
   `IN PROGRESS`, `FOUND`, `REQUIRES RETRY`, `MISSING PARENT`. `NOT FOUND` is
@@ -98,6 +110,13 @@ This is a library, not a Control Room bot - it has no entry point of its own.
 - `file_allocation` writes `sugar_id.txt` with `encoding="ansi"`, which Python
   resolves to `mbcs`. That codec is Windows-only, so this module cannot run on
   Linux. Fine for Control Room bots; worth knowing before any container move.
+- `jobstodo._SELECT_JOB_DETAILS`'s new join to `ODC_scrape_accounts` (0.7.0)
+  is an INNER JOIN and applies to every client, not just Inspired PLC. A
+  `job_details` row whose `scrape_accounts_id` has no matching
+  `ODC_scrape_accounts` row is now silently excluded from the pending/searchable
+  results for every supplier - confirmed acceptable because every current row
+  is expected to have a match, but worth checking first if a future supplier's
+  data does not guarantee that.
 - `REQUIRES RETRY` and `MISSING PARENT` are validated by `VALID_STATUSES` and
   written to the database, but nothing in the current estate resets a row in
   either status back to `pending`. `jobstodo.get_job_details()` only
@@ -107,6 +126,13 @@ This is a library, not a Control Room bot - it has no entry point of its own.
   does not exclude them); today no such mechanism exists.
 
 ## Change Log
+- 2026-08-21: v0.7.0 - fixed Inspired PLC file allocation to key the company
+  folder on the SugarCRM account name (resolved from the new `sug_internal_id`,
+  via `jobstodo`'s inner join to `ODC_scrape_accounts` and the new
+  `sugar_client.get_company_name()`) instead of the free-text
+  `ODC_job_details.customer_name`. `sugar_id.txt` is now seeded with the real
+  id instead of being left empty. New config key: `sugar.dsn`. See the new
+  Known Gotchas entry about the join being an unconditional INNER JOIN.
 - 2026-08-07: v0.6.0 - added `REQUIRES RETRY` and `MISSING PARENT` to
   `updatejobdetails.VALID_STATUSES` for the EDF Energy port's parent/child
   account grouping. See the new Known Gotchas entry: neither status is
@@ -147,6 +173,19 @@ This is a library, not a Control Room bot - it has no entry point of its own.
   does not exist and made the documented `pip install` URLs 404).
 
 ## Outstanding TODOs
+- Cut a `v0.7.0` release with the built wheel attached, following
+  `RELEASING.md`. Any supplier project whose jobs can carry
+  `client_name == "inspired plc"` rows (at least `automation-odc-wave` and
+  `automation-odc-british-gas` call `file_allocation.allocate()` today) needs
+  to pin `v0.7.0` and add a `sugar:` block to its own `config.yaml`, and pass
+  the new `sug_internal_id` value (now returned by `jobstodo.get_job_details()`)
+  through to `allocate()`, before the SugarCRM-based folder naming actually
+  takes effect for them - until then they keep the old `customer_name`
+  fallback behaviour.
+- Confirm `ODC_scrape_accounts.sug_internal_id` actually exists in both
+  `Titan_INSE_DEV` and `Titan_INSE` with that exact column name before
+  releasing v0.7.0 - it was assumed present per the SugarCRM/Titan sync, not
+  verified against the live schema from this repo.
 - Cut a `v0.6.0` release with the built wheel attached, following
   `RELEASING.md`. Only `automation-odc-edf-energy` needs to pin `v0.6.0`
   (it is the only consumer of the two new statuses so far); every other

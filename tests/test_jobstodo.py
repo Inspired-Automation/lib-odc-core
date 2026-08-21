@@ -5,6 +5,7 @@ from odc_core import jobstodo
 TABLES = {
     "jobs": "ODC_jobs",
     "job_details": "ODC_job_details",
+    "scrape_accounts": "ODC_scrape_accounts",
     "multi_credential": "ODC_multi_credentials",
     "credential": "ODC_credentials",
 }
@@ -82,6 +83,8 @@ def test_get_job_details_single_credential_pending_only(mock_connect):
     assert first_call.args[1:] == ("PROC1", "JOB1")
     executed_sql = [call.args[0] for call in cursor.execute.call_args_list]
     assert any("pending" in sql for sql in executed_sql)
+    assert any("ODC_scrape_accounts" in sql for sql in executed_sql)
+    assert any("sug_internal_id" in sql for sql in executed_sql)
 
 
 @patch("odc_core.db.pyodbc.connect")

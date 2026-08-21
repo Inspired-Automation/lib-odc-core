@@ -20,11 +20,12 @@ from . import (
     graph_client,
     jobstodo,
     pdf_auto_copy,
+    sugar_client,
     updatejobdetails,
     validate_username,
 )
 
-__version__ = "0.6.0"
+__version__ = "0.7.0"
 
 __all__ = [
     "browser_helpers",
@@ -35,6 +36,7 @@ __all__ = [
     "graph_client",
     "jobstodo",
     "pdf_auto_copy",
+    "sugar_client",
     "updatejobdetails",
     "validate_username",
 ]
