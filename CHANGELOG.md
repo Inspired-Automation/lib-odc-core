@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-09-07
+### Added
+- `jobstodo.set_human_wait(job_id, timeout_s, tables, dsn)` /
+  `jobstodo.clear_human_wait(job_id, tables, dsn)` - a job-level "waiting for
+  a human-assisted login" signal on three new nullable `ODC_jobs` columns
+  (`human_wait_status`, `human_wait_started_at`, `human_wait_deadline`),
+  requested as an additive schema change on `Titan_INSE`/`Titan_INSE_DEV`.
+  Separate from `ODC_job_details.status` (§4.1 of the spec): that vocabulary
+  is per-account and only meaningful once a supplier's `search()` starts,
+  whereas a human-assisted login wait happens once per job, before any
+  account is individually processed - there is no `job_details_id` to attach
+  a per-account status to at that point. `human_wait_deadline` is computed
+  from `SYSUTCDATETIME()` server-side so a poller never needs to separately
+  know the caller's configured timeout. First consumer: `automation-odc-energia`
+  Phase 3 (noVNC human-assisted login for a reCAPTCHA-gated portal). See
+  spec §4.2.
+
 ## [0.7.0] - 2026-08-21
 ### Fixed
 - Inspired PLC file allocation now names the company folder from the

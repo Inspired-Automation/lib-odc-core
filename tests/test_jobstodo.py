@@ -145,3 +145,35 @@ def test_clear_job_claim_commits(mock_connect):
 
     cursor.execute.assert_called_once()
     conn.commit.assert_called_once()
+
+
+@patch("odc_core.db.pyodbc.connect")
+def test_set_human_wait_commits_with_status_timeout_and_job_id(mock_connect):
+    cursor = MagicMock()
+    conn = _connect_mock(cursor)
+    mock_connect.return_value = conn
+
+    jobstodo.set_human_wait("JOB1", 600, TABLES, "Jupiter")
+
+    cursor.execute.assert_called_once()
+    sql, params = cursor.execute.call_args.args[0], cursor.execute.call_args.args[1:]
+    assert "human_wait_status" in sql
+    assert "human_wait_started_at" in sql
+    assert "human_wait_deadline" in sql
+    assert params == (jobstodo.HUMAN_WAIT_STATUS, 600, "JOB1")
+    conn.commit.assert_called_once()
+
+
+@patch("odc_core.db.pyodbc.connect")
+def test_clear_human_wait_commits(mock_connect):
+    cursor = MagicMock()
+    conn = _connect_mock(cursor)
+    mock_connect.return_value = conn
+
+    jobstodo.clear_human_wait("JOB1", TABLES, "Jupiter")
+
+    cursor.execute.assert_called_once()
+    sql, params = cursor.execute.call_args.args[0], cursor.execute.call_args.args[1:]
+    assert "human_wait_status = NULL" in sql
+    assert params == ("JOB1",)
+    conn.commit.assert_called_once()

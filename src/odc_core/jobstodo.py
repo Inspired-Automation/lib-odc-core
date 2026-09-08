@@ -83,6 +83,27 @@ _REVERT_TO_PENDING = "UPDATE {job_details} SET [status] = 'pending' WHERE id = ?
 
 _CLEAR_PROCESS_ID = "UPDATE {jobs} SET process_id = NULL WHERE id = ?"
 
+#: Job-level signal that a human-assisted login is in progress for this job.
+#: Distinct from ODC_job_details.status (updatejobdetails.VALID_STATUSES),
+#: which is per-account and only meaningful once search() starts - a
+#: human-assisted login wait happens once per job, before any account is
+#: individually processed, so it has no job_details_id to attach a per-account
+#: status to. See lib-odc-core-spec.md 4.2.
+HUMAN_WAIT_STATUS = "WAITING_FOR_HUMAN"
+
+_SET_HUMAN_WAIT = (
+    "UPDATE {jobs} SET human_wait_status = ?, "
+    "human_wait_started_at = SYSUTCDATETIME(), "
+    "human_wait_deadline = DATEADD(SECOND, ?, SYSUTCDATETIME()) "
+    "WHERE id = ?"
+)
+
+_CLEAR_HUMAN_WAIT = (
+    "UPDATE {jobs} SET human_wait_status = NULL, "
+    "human_wait_started_at = NULL, human_wait_deadline = NULL "
+    "WHERE id = ?"
+)
+
 
 def is_job_claimed(job_id: str, tables: dict, dsn: str) -> bool:
     """Return True if ODC_jobs.process_id is already set for this job_id."""
@@ -235,3 +256,46 @@ def clear_job_claim(job_id: str, tables: dict, dsn: str) -> None:
         logger.debug("JOBSTODO - cleared process_id claim for job %s", job_id)
 
     db.run(dsn, work, description=f"jobstodo.clear_job_claim({job_id})")
+
+
+def set_human_wait(job_id: str, timeout_s: int, tables: dict, dsn: str) -> None:
+    """Mark ODC_jobs as waiting on a human-assisted login.
+
+    Sets human_wait_status to HUMAN_WAIT_STATUS, human_wait_started_at to now,
+    and human_wait_deadline to (now + timeout_s) - all computed on the database
+    server so the deadline a poller reads cannot drift from clock differences
+    between the run node and Titan. Callers should pass the same timeout_s
+    their own wait loop uses (e.g. config["vnc"]["wait_for_human_timeout_s"])
+    so the two values can never diverge. Call clear_human_wait() on every exit
+    path from the wait - see that function's docstring.
+    """
+    sql = _SET_HUMAN_WAIT.format(jobs=tables["jobs"])
+
+    def work(conn) -> None:
+        cursor = conn.cursor()
+        cursor.execute(sql, HUMAN_WAIT_STATUS, timeout_s, job_id)
+        conn.commit()
+        logger.debug(
+            "JOBSTODO - set human_wait_status for job %s (timeout %ss)", job_id, timeout_s,
+        )
+
+    db.run(dsn, work, description=f"jobstodo.set_human_wait({job_id})")
+
+
+def clear_human_wait(job_id: str, tables: dict, dsn: str) -> None:
+    """Clear the waiting-for-human signal on ODC_jobs.
+
+    Call this on every exit path out of a human-assisted wait - success,
+    failure, and timeout alike - so a poller stops treating the job as waiting
+    and any provisioned session is torn down promptly rather than a stale
+    HUMAN_WAIT_STATUS lingering after the bot has already moved on.
+    """
+    sql = _CLEAR_HUMAN_WAIT.format(jobs=tables["jobs"])
+
+    def work(conn) -> None:
+        cursor = conn.cursor()
+        cursor.execute(sql, job_id)
+        conn.commit()
+        logger.debug("JOBSTODO - cleared human_wait_status for job %s", job_id)
+
+    db.run(dsn, work, description=f"jobstodo.clear_human_wait({job_id})")

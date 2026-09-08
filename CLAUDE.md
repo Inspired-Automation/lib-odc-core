@@ -23,6 +23,11 @@ This is a library, not a Control Room bot - it has no entry point of its own.
   `jupiter.aa_dev.web_scrape_data` / `jupiter.aa.web_scrape_data` (an older
   parallel pipeline consulted only for `client_name == "inspired plc"`
   duplicate checks), and the stored procedure `spODC_job_details_UpdateStatus`.
+  `ODC_jobs` also carries three columns added in 0.8.0 -
+  `human_wait_status`/`human_wait_started_at`/`human_wait_deadline` - written
+  only by `jobstodo.set_human_wait()`/`clear_human_wait()`; see spec §4.2 and
+  Outstanding TODOs (the DDL to add them is requested, not yet confirmed
+  applied).
 - `sugar_client.py` (added 0.7.0) is the one module that talks to a second,
   unrelated database: SugarCRM itself (`DSN=Sugar Corp`, MySQL), read-only,
   looking up `accounts.NAME` by id. Not Titan, not Jupiter - a caller must
@@ -126,6 +131,19 @@ This is a library, not a Control Room bot - it has no entry point of its own.
   does not exclude them); today no such mechanism exists.
 
 ## Change Log
+- 2026-09-07: v0.8.0 - added `jobstodo.set_human_wait()`/`clear_human_wait()`,
+  a job-level "waiting for a human-assisted login" signal on three new
+  nullable `ODC_jobs` columns (`human_wait_status`, `human_wait_started_at`,
+  `human_wait_deadline`), requested as an additive Titan schema change - not
+  yet confirmed applied to `Titan_INSE`/`Titan_INSE_DEV` (see Outstanding
+  TODOs). Distinct from the `ODC_job_details.status` vocabulary: that's
+  per-account and only meaningful once a supplier's `search()` starts, while
+  this wait happens once per job, before any account is individually
+  processed. First consumer: `automation-odc-energia` Phase 3 (noVNC
+  human-assisted login for a reCAPTCHA-gated portal), whose own bot
+  orchestrator ("the Control Room") is expected to poll these columns
+  directly - not through this library - to know when to surface a session.
+  See spec §4.2.
 - 2026-08-21: v0.7.0 - fixed Inspired PLC file allocation to key the company
   folder on the SugarCRM account name (resolved from the new `sug_internal_id`,
   via `jobstodo`'s inner join to `ODC_scrape_accounts` and the new
@@ -173,6 +191,16 @@ This is a library, not a Control Room bot - it has no entry point of its own.
   does not exist and made the documented `pip install` URLs 404).
 
 ## Outstanding TODOs
+- Request/confirm the `ODC_jobs` schema change for v0.8.0 (three nullable
+  columns - see spec §4.2) against both `Titan_INSE_DEV` and `Titan_INSE`.
+  `set_human_wait()`/`clear_human_wait()` will raise `pyodbc.Error` (invalid
+  column) until this lands; `automation-odc-energia`'s own call sites already
+  tolerate that (log-and-continue), but the signal has no effect until the
+  columns exist.
+- Cut a `v0.8.0` release with the built wheel attached, following
+  `RELEASING.md`. Additive/backward-compatible - no other supplier bot needs
+  to bump immediately, but `automation-odc-energia` needs it to pick up
+  `set_human_wait`/`clear_human_wait`.
 - Cut a `v0.7.0` release with the built wheel attached, following
   `RELEASING.md`. Any supplier project whose jobs can carry
   `client_name == "inspired plc"` rows (at least `automation-odc-wave` and

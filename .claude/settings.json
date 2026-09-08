@@ -3,7 +3,15 @@
     "allow": [
       "PowerShell(gh release list --repo Inspired-Automation/lib-odc-core)",
       "PowerShell(gh release view v.0.5.0 --repo Inspired-Automation/lib-odc-core --json tagName,assets)",
-      "PowerShell(try { $r = Invoke-RestMethod \"https://api.github.com/repos/Inspired-Automation/lib-odc-core/releases\" -Headers @{ 'User-Agent'='cc' }; $r | ForEach-Object { \"TAG=$\\($_.tag_name\\)  NAME=$\\($_.name\\)  draft=$\\($_.draft\\) prerelease=$\\($_.prerelease\\)\"; $_.assets | ForEach-Object { \"   asset: $\\($_.name\\)\" } } } catch { \"ERR: $\\($_.Exception.Message\\)\" })"
+      "PowerShell(try { $r = Invoke-RestMethod \"https://api.github.com/repos/Inspired-Automation/lib-odc-core/releases\" -Headers @{ 'User-Agent'='cc' }; $r | ForEach-Object { \"TAG=$\\($_.tag_name\\)  NAME=$\\($_.name\\)  draft=$\\($_.draft\\) prerelease=$\\($_.prerelease\\)\"; $_.assets | ForEach-Object { \"   asset: $\\($_.name\\)\" } } } catch { \"ERR: $\\($_.Exception.Message\\)\" })",
+      "Bash(python -m pytest -q)",
+      "Bash(pip show *)",
+      "Bash(pip install *)",
+      "Bash(git add *)",
+      "Bash(py -m build --wheel --outdir dist)",
+      "Bash(python -m build --wheel --outdir dist)",
+      "Bash(git -C \"/c/git projects/automation-odc-pdf-auto\" status --short)",
+      "Bash(git -C \"/c/git projects/automation-odc-accounts-and-jobs-refresh\" status --short)"
     ]
   }
 }

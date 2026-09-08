@@ -131,6 +131,8 @@ get_job_details(process_id: str, job_id: str, tables: dict, dsn: str) -> list[di
 get_multi_credentials(client_id: str, supplier_id: str, tables: dict, dsn: str) -> list[dict]
 revert_to_pending(job_detail_id: str, tables: dict, dsn: str) -> None
 clear_job_claim(job_id: str, tables: dict, dsn: str) -> None
+set_human_wait(job_id: str, timeout_s: int, tables: dict, dsn: str) -> None
+clear_human_wait(job_id: str, tables: dict, dsn: str) -> None
 ```
 
 `get_job_details()` stamps `ODC_jobs.process_id` **before** reading
@@ -149,6 +151,20 @@ joined `ODC_jobs` and `ODC_job_details` columns keyed by column name, plus
 `scrape_accounts_id` (added 0.7.0, for every client, not just Inspired PLC).
 A `job_details` row with no matching `scrape_accounts` row is excluded from
 the result.
+
+`set_human_wait()`/`clear_human_wait()` (added 0.8.0) write a job-level
+"waiting for a human-assisted login" signal to `ODC_jobs` - see §4.2. This is
+a separate concern from the `ODC_job_details.status` vocabulary in §4.1: that
+vocabulary is per-account and only meaningful once a supplier's `search()`
+starts, whereas a human-assisted login wait happens once per job, before any
+account is individually processed. `set_human_wait()` computes both
+`human_wait_started_at` and `human_wait_deadline` from `SYSUTCDATETIME()` on
+the database server, so a caller passes the same `timeout_s` its own wait
+loop uses and the two values can never drift apart. Neither function raises
+on its own for a missing column - if the `ODC_jobs` schema change in §4.2
+has not been applied to a given database yet, the underlying `pyodbc.Error`
+propagates like any other query error, and callers should treat that as "no
+signal support on this database yet" rather than a fatal condition.
 
 ### 3.3 `duplicate_check` - pre-download guard
 
@@ -349,7 +365,7 @@ callers that mutate data commit explicitly inside their `work(conn)` callable.
 
 | Object | Used by | Purpose |
 |--------|---------|---------|
-| `ODC_jobs` | `jobstodo`, `duplicate_check` | One row per supplier job. `process_id` is the claim marker. |
+| `ODC_jobs` | `jobstodo`, `duplicate_check` | One row per supplier job. `process_id` is the claim marker; `human_wait_status`/`human_wait_started_at`/`human_wait_deadline` (added 0.8.0) are the job-level human-assisted-login signal - see §4.2. |
 | `ODC_job_details` | `jobstodo`, `duplicate_check`, `updatejobdetails` | One row per account to collect. Carries `status`. |
 | `ODC_scrape_data` | `file_save_as`, `duplicate_check` | One row per downloaded document. |
 | `ODC_scrape_accounts` | `jobstodo`, `duplicate_check` | Inspired PLC account pool; also the source of `sug_internal_id` for every client via `jobstodo.get_job_details()`. |
@@ -373,6 +389,38 @@ IN PROGRESS, FOUND, REQUIRES RETRY, MISSING PARENT
 `ODC_scrape_data.status` additionally uses `VOID`, set by `file_save_as.save()`
 for sub-1 KB downloads. `pending` (lowercase) is the pre-run state of a
 `job_details` row and is not part of the vocabulary above.
+
+### 4.2 Human-wait signal (added 0.8.0)
+
+A separate, job-level signal on `ODC_jobs`, distinct from §4.1's per-account
+vocabulary. Written only by `jobstodo.set_human_wait()`/`clear_human_wait()`;
+no other module reads or writes these columns.
+
+```sql
+ALTER TABLE dbo.ODC_jobs ADD
+    human_wait_status     NVARCHAR(30)  NULL,   -- NULL = not waiting; 'WAITING_FOR_HUMAN' = waiting
+    human_wait_started_at DATETIME2     NULL,    -- UTC, set when the wait begins
+    human_wait_deadline   DATETIME2     NULL;    -- UTC = started_at + timeout_s
+```
+
+- `human_wait_status`: `NULL` normally; set to `jobstodo.HUMAN_WAIT_STATUS`
+  (`"WAITING_FOR_HUMAN"`) while a supplier project is waiting for a human to
+  complete a login (e.g. to clear a reCAPTCHA challenge) it cannot itself
+  automate.
+- `human_wait_started_at` / `human_wait_deadline`: both computed from
+  `SYSUTCDATETIME()` on the database server (not the run node), so a poller
+  never has to know the caller's configured timeout - it only compares its
+  own clock against `human_wait_deadline`.
+- A caller must clear this signal (`clear_human_wait()`) on every exit path
+  from the wait - success, failure, and timeout alike - so nothing downstream
+  mistakes a finished run for one still waiting on a human. Both functions
+  raise the underlying `pyodbc.Error` if these columns don't exist yet on the
+  target database (this is an additive, opt-in schema change - see the DDL
+  above); callers should treat that as "no signal support here yet", not a
+  fatal error for the run itself.
+- Not currently read by any consumer of this library; it exists for an
+  external system (a bot orchestrator) that polls `ODC_jobs` directly to
+  know when to surface a human-assisted login session.
 
 ---
 
