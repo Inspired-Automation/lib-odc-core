@@ -180,11 +180,14 @@ entry point of its own.
   credentials are already stored in `ODC_credentials`/`ODC_job_details`, but
   an RDS machine login is a higher-privilege credential than a single
   supplier portal login. `set_human_wait_complete()` nulls the three RDP
-  columns as soon as a wait concludes successfully, and `clear_human_wait()`
-  nulls everything again on every exit path regardless - but a caller that
-  skips both (crash before the `finally`, process killed) leaves a live RDP
-  credential sitting in Titan until someone notices and clears it manually -
-  there is no separate expiry/sweep job today.
+  columns as soon as a wait concludes successfully (this happens
+  regardless of whether `clear_human_wait()` is ever called afterward,
+  since `COMPLETE` persists as of 0.8.4 - see the Change Log), and
+  `clear_human_wait()` nulls everything again on a failure/timeout exit -
+  but a caller that skips both (crash before the `finally`, process
+  killed) leaves a live RDP credential sitting in Titan until someone
+  notices and clears it manually - there is no separate expiry/sweep job
+  today.
 - Detecting that a human has actually finished a human-assisted login is
   deliberately outside `jobstodo`'s scope - `set_human_wait_complete()` only
   records that it happened, it never detects it itself. As of 0.8.1 this
@@ -218,6 +221,33 @@ entry point of its own.
   the same reason - never add another `window.*` global here.
 
 ## Change Log
+- 2026-09-09: v0.8.4 - `human_in_loop.wait_for_human_login()` no longer
+  calls `jobstodo.clear_human_wait()` after a successful login.
+  `human_wait_status = 'COMPLETE'` is now a persistent terminal state
+  rather than a transient one - the previous unconditional `finally` block
+  meant a successful wait's `COMPLETE` was cleared back to `NULL` moments
+  later (after `TAKEOVER_PAUSE_S`, 5s), too small and racy a window for a
+  poller's toolkit to reliably observe it and react. `clear_human_wait()`
+  now runs only on a failure or timeout exit, where `COMPLETE` was never
+  written at all - resets straight to `NULL` from `PENDING_HUMAN`, nothing
+  worth keeping. `jobstodo.py`'s module-level `human_wait_status` lifecycle
+  comment and the `set_human_wait_complete()`/`clear_human_wait()`
+  docstrings now state this explicitly: do not call `clear_human_wait()`
+  automatically right after `set_human_wait_complete()`. Requested directly
+  from live testing of v0.8.3's fix.
+  - Also added `human_in_loop.get_current_windows_username()`, a thin
+    `getpass.getuser()` wrapper for building `rdp_username` from the
+    account the bot's own process is actually signed in as, instead of a
+    static per-supplier config value that can drift once RDS machines are
+    assigned dynamically per run.
+  - Also added `wait_for_human_login()`'s `started_message` parameter
+    (trailing, defaulted to `DEFAULT_STARTED_MESSAGE` - existing positional
+    call sites are unaffected), so a caller can override the "started"
+    banner text for a portal-specific instruction (Energia wants "resolve
+    the reCAPTCHA challenge") instead of this library's generic wording.
+    Only the started banner is overridable - the "taking over"/"no
+    response" banners stay fixed, since neither references anything
+    portal-specific.
 - 2026-09-09: v0.8.3 - fixed `human_in_loop`'s confirm-button signal to use
   a DOM attribute (`element.dataset.confirmed`) instead of a `window.*`
   global. Live testing against `automation-odc-energia` immediately after

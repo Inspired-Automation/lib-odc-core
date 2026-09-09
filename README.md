@@ -54,8 +54,17 @@ for detail in job_details:
   on-page banner, an injected "I'm logged in" confirm button, a poll loop,
   and the `jobstodo` DB signal lifecycle around it, all in one call. The
   caller supplies `is_logged_in(page) -> bool`, the one genuinely
-  portal-specific piece (each supplier's post-login marker differs).
-  Generalised out of `automation-odc-energia`'s Phase 3.
+  portal-specific piece (each supplier's post-login marker differs), and
+  may override the "started" banner text via `started_message` (default:
+  generic wording) for a portal-specific instruction, e.g. "resolve the
+  reCAPTCHA challenge". On success, `human_wait_status` is left at
+  `COMPLETE` (a persistent terminal state, not auto-cleared). Generalised
+  out of `automation-odc-energia`'s
+  Phase 3. Also exports `get_current_windows_username()`, a thin
+  `getpass.getuser()` wrapper for building the `rdp_username` argument from
+  the account the bot's own process is actually signed in as, rather than a
+  static config value that can drift once RDS machines are assigned
+  dynamically.
 - `file_allocation.py` - work out the target folder/filename for a downloaded
   invoice from `ODC_jobs`/`ODC_job_details` fields. For Inspired PLC, resolves
   the company folder name from SugarCRM via `sugar_client` and `sug_internal_id`

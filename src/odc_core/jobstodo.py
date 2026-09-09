@@ -92,8 +92,9 @@ _CLEAR_PROCESS_ID = "UPDATE {jobs} SET process_id = NULL WHERE id = ?"
 #: individually processed, so it has no job_details_id to attach a per-account
 #: status to. See lib-odc-core-spec.md 4.2.
 #:
-#: human_wait_status moves through three states:
-#:   NULL -> HUMAN_WAIT_PENDING -> HUMAN_WAIT_COMPLETE -> NULL
+#: human_wait_status moves through these states:
+#:   NULL -> HUMAN_WAIT_PENDING -> HUMAN_WAIT_COMPLETE (terminal)
+#:                              -> NULL (failure/timeout, HUMAN_WAIT_COMPLETE skipped)
 #: set_human_wait() writes HUMAN_WAIT_PENDING (the cue for a poller's
 #: toolkit to open the RDP session using rdp_host/rdp_username/
 #: rdp_password). Detecting that the human has actually finished logging in
@@ -101,11 +102,18 @@ _CLEAR_PROCESS_ID = "UPDATE {jobs} SET process_id = NULL WHERE id = ?"
 #: confirm button or a post-login URL check polled from the caller's own
 #: wait loop. Once the caller's wait loop confirms success, it calls
 #: set_human_wait_complete(), which writes HUMAN_WAIT_COMPLETE and nulls
-#: the RDP columns - the cue for the toolkit to disconnect. The caller must
-#: still call clear_human_wait() on every exit path regardless - success,
-#: failure, and timeout alike - to fully close out the signal; on a
-#: failure/timeout exit, clear_human_wait() is called directly from
-#: HUMAN_WAIT_PENDING and HUMAN_WAIT_COMPLETE is never written.
+#: the RDP columns - the cue for the toolkit to disconnect.
+#: HUMAN_WAIT_COMPLETE is a deliberately persistent terminal state, not a
+#: transient one - a caller should NOT also call clear_human_wait() right
+#: after a success (see human_in_loop.wait_for_human_login(), which does
+#: not), since that would erase the very signal a poller is meant to
+#: observe with no fixed time budget. clear_human_wait() is for the paths
+#: where nothing succeeded: called directly from HUMAN_WAIT_PENDING on a
+#: failure or timeout exit, where HUMAN_WAIT_COMPLETE is never written at
+#: all - there is nothing worth keeping, so the row resets straight to
+#: NULL. A caller that genuinely wants to reset a HUMAN_WAIT_COMPLETE row
+#: back to NULL later (e.g. once its own downstream consumer has finished
+#: reacting to it) may still call clear_human_wait() itself for that.
 HUMAN_WAIT_PENDING = "PENDING_HUMAN"
 HUMAN_WAIT_COMPLETE = "COMPLETE"
 
@@ -318,9 +326,10 @@ def set_human_wait(
     Call set_human_wait_complete() once the caller's own wait loop confirms
     the human has finished logging in (that detection - e.g. an in-page
     confirm button or a post-login URL check - is the caller's concern, not
-    this library's), then call clear_human_wait() on every exit path from
-    the wait regardless - success, failure, and timeout alike. See each
-    function's docstring.
+    this library's) - that call's HUMAN_WAIT_COMPLETE is a persistent
+    terminal state, not one to immediately clear. Only a failure or timeout
+    exit should call clear_human_wait() directly, resetting the row to NULL
+    without ever writing HUMAN_WAIT_COMPLETE. See each function's docstring.
     """
     sql = _SET_HUMAN_WAIT.format(jobs=tables["jobs"])
 
@@ -339,7 +348,7 @@ def set_human_wait(
 
 
 def set_human_wait_complete(job_id: str, tables: dict, dsn: str) -> None:
-    """Mark a human-assisted login as finished, ahead of the final clear.
+    """Mark a human-assisted login as finished - a persistent terminal state.
 
     Sets human_wait_status to HUMAN_WAIT_COMPLETE and nulls
     rdp_host/rdp_username/rdp_password - the cue for a poller's toolkit to
@@ -352,8 +361,15 @@ def set_human_wait_complete(job_id: str, tables: dict, dsn: str) -> None:
     Call this only after the caller's own wait loop has confirmed the human
     actually finished logging in - never on a failure or timeout exit path,
     so a poller never reads COMPLETE for a login that didn't succeed; those
-    paths should call clear_human_wait() directly instead. The caller must
-    still call clear_human_wait() afterwards to fully close out the signal.
+    paths should call clear_human_wait() directly instead, which never
+    writes HUMAN_WAIT_COMPLETE at all. Do NOT call clear_human_wait() right
+    after this on a success path (see human_in_loop.wait_for_human_login(),
+    which deliberately does not) - HUMAN_WAIT_COMPLETE is meant to persist
+    so a poller can observe it without racing a fixed time budget, not be
+    erased moments later. A caller with its own reason to eventually reset
+    a completed row back to NULL (e.g. once its downstream consumer has
+    finished reacting) may still call clear_human_wait() itself, just not
+    as an automatic, immediate follow-up to this call.
     """
     sql = _SET_HUMAN_WAIT_COMPLETE.format(jobs=tables["jobs"])
 
@@ -369,14 +385,18 @@ def set_human_wait_complete(job_id: str, tables: dict, dsn: str) -> None:
 def clear_human_wait(job_id: str, tables: dict, dsn: str) -> None:
     """Clear the human-wait signal and RDP connection details on ODC_jobs.
 
-    Call this on every exit path out of a human-assisted wait - success,
-    failure, and timeout alike - so a poller stops treating the job as
-    waiting, any provisioned session is torn down promptly rather than a
-    stale HUMAN_WAIT_PENDING/HUMAN_WAIT_COMPLETE lingering after the bot has
-    already moved on, and the plaintext rdp_host/rdp_username/rdp_password
-    fields do not sit in the database once the RDS machine is no longer in
-    use for this job. Safe to call even if set_human_wait_complete() already
-    nulled the RDP columns, or was never reached at all.
+    Call this on a failure or timeout exit from a human-assisted wait - one
+    where set_human_wait_complete() was never reached, so the row is still
+    at HUMAN_WAIT_PENDING - so a poller stops treating the job as waiting,
+    any provisioned session is torn down promptly, and the plaintext
+    rdp_host/rdp_username/rdp_password fields do not sit in the database
+    once the RDS machine is no longer in use for this job.
+
+    Do NOT call this automatically right after a successful
+    set_human_wait_complete() - see that function's docstring for why
+    HUMAN_WAIT_COMPLETE is meant to persist, not be cleared moments later.
+    It remains safe to call in that situation if a caller genuinely has its
+    own reason to reset a completed row back to NULL later.
     """
     sql = _CLEAR_HUMAN_WAIT.format(jobs=tables["jobs"])
 

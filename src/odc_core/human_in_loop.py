@@ -15,6 +15,7 @@ lib-odc-core-spec.md §4.2/§4.3.
 
 from __future__ import annotations
 
+import getpass
 import logging
 import time
 from collections.abc import Callable
@@ -23,6 +24,25 @@ from typing import Any
 from . import browser_helpers, jobstodo
 
 logger = logging.getLogger(__name__)
+
+
+def get_current_windows_username() -> str:
+    """Return the Windows username the current process is signed in as.
+
+    Convenience for building the `rdp_username` argument to
+    `wait_for_human_login()`/`jobstodo.set_human_wait()`: the RDS machine's
+    human-assisted RDP session needs to connect as the same Windows account
+    the bot's own browser session is already running under, so a poller's
+    toolkit reaches the actual desktop the bot is driving rather than a
+    different session. A per-supplier config value can drift from the
+    actual machine's account, especially once RDS machines are assigned
+    dynamically per run rather than fixed - this reads it directly from the
+    OS instead. Thin wrapper around `getpass.getuser()`, which raises
+    `OSError` if no username can be determined - not expected in this
+    setup, since the wait already requires an interactive desktop session
+    (see `automation-odc-energia`'s own `main.py` comment on that).
+    """
+    return getpass.getuser()
 
 #: Seconds between poll ticks while waiting for the human.
 POLL_INTERVAL_S = 1.5
@@ -43,6 +63,15 @@ TAKEOVER_PAUSE_S = 5
 _BANNER_COLOR_STARTED = "#2980b9"   # blue - informational, process beginning
 _BANNER_COLOR_TAKEOVER = "#c0392b"  # red - stop interacting, bot has control
 _BANNER_COLOR_TIMEOUT = "#e67e22"   # amber - warning, no human response
+
+#: Default "started" banner text - generic across every human_in_loop
+#: supplier. A caller with a more specific instruction to give the human
+#: (e.g. "resolve the reCAPTCHA challenge") can override it via
+#: wait_for_human_login()'s started_message argument rather than this
+#: library guessing at portal-specific wording.
+DEFAULT_STARTED_MESSAGE = (
+    "Automation started - please log in, then click 'I'm logged in' (bottom right)"
+)
 
 # Fixed-position, max z-index, reuses one self-identifying element so a
 # later call replaces the message/color instead of stacking banners.
@@ -211,6 +240,7 @@ def _poll_until_logged_in(
     page: Any,
     is_logged_in: Callable[[Any], bool],
     timeout_s: int,
+    started_message: str,
 ) -> bool:
     """Show the started banner, inject the confirm button, then poll until
     the button is clicked or timeout_s elapses.
@@ -226,11 +256,7 @@ def _poll_until_logged_in(
     ambiguity.
     """
     _inject_login_confirm_button(page)
-    _show_banner(
-        page,
-        "Automation started - please log in, then click 'I'm logged in' (bottom right)",
-        _BANNER_COLOR_STARTED,
-    )
+    _show_banner(page, started_message, _BANNER_COLOR_STARTED)
 
     logger.info("HUMAN_IN_LOOP - waiting up to %ss for a human to complete login", timeout_s)
     last_heartbeat = time.monotonic()
@@ -264,6 +290,7 @@ def wait_for_human_login(
     tables: dict,
     dsn: str,
     config: dict,
+    started_message: str = DEFAULT_STARTED_MESSAGE,
 ) -> bool:
     """Run a human-assisted login: DB signal, on-page banner/button, poll loop.
 
@@ -271,6 +298,14 @@ def wait_for_human_login(
     human needs to complete by hand - this function does not navigate there
     itself, since portal navigation and cookie-banner dismissal are the
     caller's own concern (each supplier's portal differs).
+
+    `started_message` is the banner text shown while waiting (default:
+    DEFAULT_STARTED_MESSAGE, generic across every human_in_loop supplier).
+    Override it with something specific to what the human actually needs to
+    do on this portal - e.g. "Please resolve the reCAPTCHA challenge, then
+    click 'I'm logged in'" - rather than this library guessing at
+    portal-specific wording. Added as a trailing, defaulted argument so
+    existing positional call sites keep working unchanged.
 
     Sequence:
       1. jobstodo.set_human_wait() - writes human_wait_status=PENDING_HUMAN
@@ -284,12 +319,16 @@ def wait_for_human_login(
       3. On success: shows a "taking over" banner, clears the confirm
          button, calls jobstodo.set_human_wait_complete() (nulls the RDP
          columns - the cue for the toolkit to disconnect), then sleeps
-         TAKEOVER_PAUSE_S before returning True - both to let the human read
-         the banner and to give a poller a window to observe COMPLETE before
-         it is cleared to NULL (see step 4).
-      4. jobstodo.clear_human_wait() always runs in a finally, regardless of
-         success, failure, or an exception raised from `is_logged_in()` -
-         the signal must never linger.
+         TAKEOVER_PAUSE_S before returning True, giving the human a moment
+         to read the banner and stop interacting. human_wait_status is left
+         at COMPLETE - jobstodo.clear_human_wait() is deliberately NOT
+         called on this path (see step 4), so a poller can observe COMPLETE
+         for as long as it needs rather than racing a fixed window.
+      4. jobstodo.clear_human_wait() runs in a finally, but only fires when
+         `success` is False - a genuine failure, a timeout, or an exception
+         raised from `is_logged_in()`/the poll loop. Those paths have
+         nothing worth keeping, so the row is fully reset to NULL rather
+         than left at PENDING_HUMAN.
       5. On timeout instead of success: shows a "no response" banner, logs,
          and takes an error screenshot (browser_helpers.take_error_screenshot),
          then returns False. set_human_wait_complete() is never called on
@@ -324,8 +363,9 @@ def wait_for_human_login(
             "without the Control Room/RDP signal", job_id,
         )
 
+    success = False
     try:
-        success = _poll_until_logged_in(page, is_logged_in, timeout_s)
+        success = _poll_until_logged_in(page, is_logged_in, timeout_s, started_message)
 
         if success:
             logger.info(
@@ -359,11 +399,17 @@ def wait_for_human_login(
                 _BANNER_COLOR_TIMEOUT,
             )
     finally:
-        try:
-            jobstodo.clear_human_wait(job_id, tables, dsn)
-        except Exception:
-            logger.exception(
-                "HUMAN_IN_LOOP - could not clear human_wait_status for job %s", job_id,
-            )
+        # Only a non-success exit (failure, timeout, or an exception from
+        # is_logged_in()/the poll loop) clears the row back to NULL. On
+        # success, human_wait_status is left at COMPLETE deliberately - see
+        # set_human_wait_complete()'s docstring for why it persists rather
+        # than being cleared moments later.
+        if not success:
+            try:
+                jobstodo.clear_human_wait(job_id, tables, dsn)
+            except Exception:
+                logger.exception(
+                    "HUMAN_IN_LOOP - could not clear human_wait_status for job %s", job_id,
+                )
 
     return success

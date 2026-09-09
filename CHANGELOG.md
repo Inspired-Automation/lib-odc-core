@@ -7,6 +7,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.8.4] - 2026-09-09
+### Changed
+- `human_in_loop.wait_for_human_login()` no longer calls
+  `jobstodo.clear_human_wait()` after a successful login.
+  `human_wait_status = 'COMPLETE'` is now a **persistent terminal state**,
+  not a transient one - previously the row was cleared back to `NULL`
+  moments after `COMPLETE` was written (the finally block ran
+  unconditionally), leaving a poller's toolkit too small and racy a window
+  to reliably observe `COMPLETE` and react. `clear_human_wait()` now only
+  runs on a failure or timeout exit, where `COMPLETE` was never written in
+  the first place, resetting the row straight to `NULL` from
+  `PENDING_HUMAN`. A caller that wants a completed row eventually reset to
+  `NULL` for some other reason may still call `clear_human_wait()` itself -
+  it just no longer happens automatically as a follow-up to
+  `set_human_wait_complete()`. `jobstodo.set_human_wait_complete()` and
+  `clear_human_wait()`'s docstrings, and the module-level `human_wait_status`
+  lifecycle comment in `jobstodo.py`, are updated to state this explicitly.
+### Added
+- `human_in_loop.get_current_windows_username()` - a thin `getpass.getuser()`
+  wrapper for building the `rdp_username` argument to `wait_for_human_login()`
+  from the Windows account the bot's own process is actually signed in as,
+  rather than a static per-supplier config value. The human-assisted RDP
+  session needs to connect as that same account to reach the desktop the
+  bot is actually driving; a config value can drift once RDS machines are
+  assigned dynamically per run.
+- `wait_for_human_login()` gains a `started_message` parameter (trailing,
+  defaulted to the existing generic wording as `DEFAULT_STARTED_MESSAGE` -
+  non-breaking for existing positional call sites) so a caller can override
+  the "started" banner text with a portal-specific instruction (e.g.
+  "resolve the reCAPTCHA challenge") instead of this library's generic
+  "please log in" wording. Only the started banner is overridable this way;
+  the "taking over"/"no response" banners stay fixed generic text.
+
 ## [0.8.3] - 2026-09-09
 ### Fixed
 - `human_in_loop`'s confirm-button signal now uses a DOM attribute

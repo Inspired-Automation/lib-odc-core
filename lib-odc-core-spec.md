@@ -172,12 +172,14 @@ that vocabulary is per-account and only meaningful once a supplier's
 `search()` starts, whereas a human-assisted login wait happens once per
 job, before any account is individually processed.
 
-`human_wait_status` moves through three states: `NULL` ->
+`human_wait_status` moves through these states: `NULL` ->
 `HUMAN_WAIT_PENDING` (`"PENDING_HUMAN"`) -> `HUMAN_WAIT_COMPLETE`
-(`"COMPLETE"`) -> `NULL`. `set_human_wait()` writes `HUMAN_WAIT_PENDING`
-and computes `human_wait_deadline` from `SYSUTCDATETIME()` on the database
-server, so a caller passes the same `timeout_s` its own wait loop uses and
-the two can never drift apart. It also writes the RDS machine and login
+(`"COMPLETE"`, terminal) on success, or directly back to `NULL` on a
+failure/timeout exit (`HUMAN_WAIT_COMPLETE` is never written on that path).
+`set_human_wait()` writes `HUMAN_WAIT_PENDING` and computes
+`human_wait_deadline` from `SYSUTCDATETIME()` on the database server, so a
+caller passes the same `timeout_s` its own wait loop uses and the two can
+never drift apart. It also writes the RDS machine and login
 (`rdp_host`/`rdp_username`/`rdp_password`) the poller's toolkit needs to
 open the RDP session behind the login view - the human-assisted flow the
 signal exists for cannot connect without them, so these three are
@@ -191,19 +193,22 @@ post-login URL check polled from the caller's own wait loop. Most callers
 should not call `set_human_wait()`/`set_human_wait_complete()`/
 `clear_human_wait()` directly at all - see `human_in_loop.wait_for_human_login()`
 (§3.2a), which wraps all three around exactly this kind of poll loop. Once a
-wait loop confirms
-success, it calls `set_human_wait_complete()`, which writes
-`HUMAN_WAIT_COMPLETE` and nulls `rdp_host`/`rdp_username`/`rdp_password` -
-the cue for the toolkit to disconnect the RDP session, since those
-credentials are no longer valid for this job once it does. The caller must
-still call `clear_human_wait()` on every exit path regardless of whether
-`set_human_wait_complete()` was reached - success, failure, and timeout
-alike - which nulls all five columns (including `human_wait_status` itself)
-so no credential lingers in the database and no poller mistakes a finished
-or abandoned run for one still waiting on a human. `set_human_wait_complete()`
-should only be called after a confirmed success; a failure/timeout exit
-calls `clear_human_wait()` directly from `HUMAN_WAIT_PENDING`; a poller must
-never read `HUMAN_WAIT_COMPLETE` for a login that didn't actually succeed.
+wait loop confirms success, it calls `set_human_wait_complete()`, which
+writes `HUMAN_WAIT_COMPLETE` and nulls `rdp_host`/`rdp_username`/
+`rdp_password` - the cue for the toolkit to disconnect the RDP session,
+since those credentials are no longer valid for this job once it does.
+`HUMAN_WAIT_COMPLETE` is a **deliberately persistent terminal state**
+(0.8.4) - a caller must **not** also call `clear_human_wait()` immediately
+after a success, since that would erase the very signal a poller is meant
+to observe, and there is no fixed time budget for it to do so. Only a
+failure or timeout exit calls `clear_human_wait()`, resetting the row
+straight to `NULL` from `HUMAN_WAIT_PENDING` without ever writing
+`HUMAN_WAIT_COMPLETE` - there was nothing worth keeping on that path. A
+poller must never read `HUMAN_WAIT_COMPLETE` for a login that didn't
+actually succeed; a caller with its own reason to eventually reset a
+completed row back to `NULL` (once its downstream consumer has finished
+reacting, say) may still call `clear_human_wait()` itself for that, just
+not as an automatic follow-up to `set_human_wait_complete()`.
 
 Neither `set_human_wait()`, `set_human_wait_complete()`, nor
 `clear_human_wait()` raises on its own for a missing column - if the
@@ -226,8 +231,32 @@ wait_for_human_login(
     tables: dict,
     dsn: str,
     config: dict,
+    started_message: str = DEFAULT_STARTED_MESSAGE,
 ) -> bool
+
+get_current_windows_username() -> str
 ```
+
+`started_message` (0.8.4, trailing/defaulted - existing positional call
+sites are unaffected) is the banner text shown while waiting, default
+`DEFAULT_STARTED_MESSAGE` ("Automation started - please log in, then click
+'I'm logged in' (bottom right)"), generic across every human_in_loop
+supplier. A caller with a more specific instruction for the human - e.g.
+Energia's "Please resolve the reCAPTCHA challenge, then click 'I'm logged
+in'" - passes its own text rather than this library guessing at
+portal-specific wording. Only the *started* banner is overridable this way;
+the "taking over" and "no response" banners stay fixed, generic text, since
+neither references anything portal-specific.
+
+`get_current_windows_username()` (0.8.4) is a thin `getpass.getuser()`
+wrapper - a convenience for building the `rdp_username` argument above from
+the Windows account the bot's own process is actually signed in as, rather
+than a static per-supplier config value. The human-assisted RDP session
+needs to connect as that same account to reach the desktop the bot is
+actually driving; a config value can drift once RDS machines are assigned
+dynamically per run (see `rdp_host`'s own note in §4.2). Raises `OSError`
+if no username can be determined - not expected here, since the wait
+already requires an interactive desktop session.
 
 Added 0.8.1, generalised out of `automation-odc-energia`'s Phase 3 (see
 `docs/energia-human-assisted-login-control-room-contract.md` in that repo,
@@ -272,12 +301,23 @@ What it does, end to end:
    click has no such ambiguity.
 3. On success: shows a "taking over" banner, clears the confirm button,
    calls `jobstodo.set_human_wait_complete()`, then sleeps 5s
-   (`TAKEOVER_PAUSE_S`) before returning `True` - this pause does double
-   duty as the human's moment to stop interacting with the page *and* as
-   the window during which a poller can observe `HUMAN_WAIT_COMPLETE`
-   before the next step clears it.
-4. `jobstodo.clear_human_wait()` always runs in a `finally`, regardless of
-   success, timeout, or an exception from `is_logged_in()`.
+   (`TAKEOVER_PAUSE_S`) before returning `True`, giving the human a moment
+   to stop interacting with the page. `human_wait_status` is left at
+   `COMPLETE` - `jobstodo.clear_human_wait()` is deliberately **not**
+   called on this path (0.8.4 - see below), so a poller can observe
+   `COMPLETE` for as long as it needs, not race a fixed window before it
+   disappears.
+4. `jobstodo.clear_human_wait()` runs in a `finally`, but only fires when
+   the wait did **not** succeed - a failure, a timeout, or an exception
+   from `is_logged_in()`/the poll loop. Those paths reset the row straight
+   to `NULL` (`HUMAN_WAIT_COMPLETE` is never written on them at all).
+   Before 0.8.4, this ran unconditionally, which meant a successful wait's
+   `COMPLETE` was cleared back to `NULL` moments later regardless - found
+   in live testing to be too narrow a window for a poller to reliably
+   observe `COMPLETE` before it vanished, and now treated as a genuine
+   persistent terminal state instead. A caller with its own reason to
+   eventually reset a completed row may still call `clear_human_wait()`
+   itself later - it's just no longer automatic.
 5. On timeout (no success within `timeout_s`): shows a "no response"
    banner, logs, and takes an error screenshot via
    `browser_helpers.take_error_screenshot()`, then returns `False`.
@@ -530,15 +570,16 @@ the DDL below: the applied `human_wait_status` is `VARCHAR(50)`, not
 
 ```sql
 ALTER TABLE dbo.ODC_jobs ADD
-    human_wait_status   NVARCHAR(30)  NULL,   -- NULL = not waiting; 'PENDING_HUMAN' = waiting; 'COMPLETE' = human finished, not yet cleared
+    human_wait_status   NVARCHAR(30)  NULL,   -- NULL = not waiting (or a failure/timeout exit); 'PENDING_HUMAN' = waiting; 'COMPLETE' = human finished (persists - not auto-cleared)
     human_wait_deadline DATETIME2     NULL,   -- UTC, set when the wait begins = SYSUTCDATETIME() + timeout_s
     rdp_host             NVARCHAR(255) NULL,   -- RDS machine hostname/IP for the human-assisted RDP session
     rdp_username          NVARCHAR(128) NULL,   -- RDP login for rdp_host
     rdp_password          NVARCHAR(256) NULL;   -- RDP password for rdp_host, plaintext (see below)
 ```
 
-`human_wait_status` lifecycle - `NULL` -> `PENDING_HUMAN` -> `COMPLETE` ->
-`NULL`:
+`human_wait_status` lifecycle - `NULL` -> `PENDING_HUMAN` -> `COMPLETE`
+(terminal) on success, or `NULL` directly on a failure/timeout exit
+(`COMPLETE` never written on that path):
 
 1. **`set_human_wait()`** writes `human_wait_status = 'PENDING_HUMAN'`
    (`jobstodo.HUMAN_WAIT_PENDING`), `human_wait_deadline`, and
@@ -553,14 +594,18 @@ ALTER TABLE dbo.ODC_jobs ADD
    `human_wait_status = 'COMPLETE'` (`jobstodo.HUMAN_WAIT_COMPLETE`) and
    nulls `rdp_host`/`rdp_username`/`rdp_password` - the cue for the toolkit
    to disconnect the RDP session, since those credentials are no longer
-   valid for this job once it does. On a failure/timeout exit instead, this
-   step is skipped entirely - a poller must never read `COMPLETE` for a
-   login that didn't actually succeed.
+   valid for this job once it does. `COMPLETE` is a **persistent terminal
+   state** (0.8.4): the caller must not also call `clear_human_wait()`
+   right after this, since a poller needs to be able to observe `COMPLETE`
+   without racing a fixed time budget before it disappears.
 4. **`clear_human_wait()`** nulls all five columns, including
-   `human_wait_status` itself. Called on every exit path regardless of
-   whether step 3 was reached - success, failure, and timeout alike - so
-   nothing downstream mistakes a finished or abandoned run for one still
-   waiting on a human, and no stale RDP credential is left behind.
+   `human_wait_status` itself, on a failure or timeout exit only - one
+   where step 3 was never reached, so the row is still at `PENDING_HUMAN`.
+   There is nothing worth keeping on that path, so it resets straight to
+   `NULL` rather than lingering. (Before 0.8.4 this ran unconditionally on
+   every exit path, clearing a successful `COMPLETE` back to `NULL` moments
+   later - found in live testing to leave pollers too small a window to
+   reliably observe it.)
 
 Column notes:
 
@@ -578,9 +623,11 @@ Column notes:
   portal-credential pattern in `ODC_credentials`/`ODC_job_details`; treat
   this as a genuinely higher-privilege credential than a portal login (RDP
   access to a machine, not a single supplier website) - `set_human_wait_complete()`
-  nulls these as soon as the wait concludes successfully, and
-  `clear_human_wait()` nulls them again regardless, so the plaintext-in-Titan
-  exposure window is no longer than the wait itself, and often shorter.
+  nulls these as soon as the wait concludes successfully (whether or not
+  `clear_human_wait()` is ever called afterward, since `COMPLETE` now
+  persists), and `clear_human_wait()` nulls them again on a failure/timeout
+  exit, so the plaintext-in-Titan exposure window is no longer than the
+  wait itself, and often shorter.
 - All three functions raise the underlying `pyodbc.Error` if these columns
   don't exist yet on the target database (this is an additive, opt-in
   schema change - see the DDL above); callers should treat that as "no
