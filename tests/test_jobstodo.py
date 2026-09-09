@@ -173,7 +173,11 @@ def test_set_human_wait_commits_with_status_timeout_rdp_and_job_id(mock_connect)
 
 
 @patch("odc_core.db.pyodbc.connect")
-def test_set_human_wait_complete_commits_and_nulls_rdp_fields(mock_connect):
+def test_set_human_wait_complete_only_updates_status(mock_connect):
+    # 0.8.5: rdp_host/rdp_username/rdp_password and human_wait_deadline are
+    # deliberately left untouched - only human_wait_status changes, so a
+    # poller/audit trail can see which machine and login a completed job
+    # used.
     cursor = MagicMock()
     conn = _connect_mock(cursor)
     mock_connect.return_value = conn
@@ -183,9 +187,9 @@ def test_set_human_wait_complete_commits_and_nulls_rdp_fields(mock_connect):
     cursor.execute.assert_called_once()
     sql, params = cursor.execute.call_args.args[0], cursor.execute.call_args.args[1:]
     assert "human_wait_status" in sql
-    assert "rdp_host = NULL" in sql
-    assert "rdp_username = NULL" in sql
-    assert "rdp_password = NULL" in sql
+    assert "rdp_host" not in sql
+    assert "rdp_username" not in sql
+    assert "rdp_password" not in sql
     assert "human_wait_deadline" not in sql
     assert params == (jobstodo.HUMAN_WAIT_COMPLETE, "JOB1")
     conn.commit.assert_called_once()

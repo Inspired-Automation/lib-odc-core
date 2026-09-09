@@ -179,15 +179,19 @@ entry point of its own.
   `rdp_password` to `ODC_jobs` in plaintext - consistent with how portal
   credentials are already stored in `ODC_credentials`/`ODC_job_details`, but
   an RDS machine login is a higher-privilege credential than a single
-  supplier portal login. `set_human_wait_complete()` nulls the three RDP
-  columns as soon as a wait concludes successfully (this happens
-  regardless of whether `clear_human_wait()` is ever called afterward,
-  since `COMPLETE` persists as of 0.8.4 - see the Change Log), and
-  `clear_human_wait()` nulls everything again on a failure/timeout exit -
-  but a caller that skips both (crash before the `finally`, process
-  killed) leaves a live RDP credential sitting in Titan until someone
-  notices and clears it manually - there is no separate expiry/sweep job
-  today.
+  supplier portal login. As of 0.8.5, `set_human_wait_complete()` leaves
+  the three RDP columns untouched (an explicit choice - see the Change Log
+  - so a completed job's machine/login stays visible for as long as
+  `COMPLETE` persists, for audit purposes or a toolkit re-confirming which
+  session to close); only `clear_human_wait()` ever nulls them, on a
+  failure/timeout exit. Since `COMPLETE` persists indefinitely and nothing
+  clears it automatically, a successfully completed row's plaintext RDP
+  password can sit in Titan indefinitely too, unless a caller separately
+  calls `clear_human_wait()` once it's done with the row - a known,
+  deliberate tradeoff. A caller that never does that (crash before the
+  `finally` on a failure path, or simply never bothering on a success path)
+  leaves a live RDP credential sitting in Titan until someone notices and
+  clears it manually - there is no separate expiry/sweep job today.
 - Detecting that a human has actually finished a human-assisted login is
   deliberately outside `jobstodo`'s scope - `set_human_wait_complete()` only
   records that it happened, it never detects it itself. As of 0.8.1 this
@@ -221,6 +225,20 @@ entry point of its own.
   the same reason - never add another `window.*` global here.
 
 ## Change Log
+- 2026-09-09: v0.8.5 - `jobstodo.set_human_wait_complete()` no longer nulls
+  `rdp_host`/`rdp_username`/`rdp_password`; it now only writes
+  `human_wait_status = 'COMPLETE'`, leaving those and `human_wait_deadline`
+  exactly as `set_human_wait()` wrote them. With `COMPLETE` now persistent
+  (0.8.4), nulling the RDP fields in the same update meant a completed row
+  showed `COMPLETE` with the RDP details already gone - not what the
+  poller/audit use case needs. Requested directly: only `human_wait_status`
+  should change once the reCAPTCHA is resolved. **Security tradeoff, made
+  explicitly**: a completed row's plaintext RDP password can now sit in
+  Titan indefinitely, since neither this call nor anything else nulls it
+  automatically anymore - only `clear_human_wait()` does, and it is not
+  called automatically on a success path (per 0.8.4). A caller that wants
+  the credential eventually removed needs to call `clear_human_wait()`
+  itself once it's done with the row - see the updated Known Gotchas entry.
 - 2026-09-09: v0.8.4 - `human_in_loop.wait_for_human_login()` no longer
   calls `jobstodo.clear_human_wait()` after a successful login.
   `human_wait_status = 'COMPLETE'` is now a persistent terminal state

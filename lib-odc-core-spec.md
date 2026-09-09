@@ -194,9 +194,14 @@ should not call `set_human_wait()`/`set_human_wait_complete()`/
 `clear_human_wait()` directly at all - see `human_in_loop.wait_for_human_login()`
 (§3.2a), which wraps all three around exactly this kind of poll loop. Once a
 wait loop confirms success, it calls `set_human_wait_complete()`, which
-writes `HUMAN_WAIT_COMPLETE` and nulls `rdp_host`/`rdp_username`/
-`rdp_password` - the cue for the toolkit to disconnect the RDP session,
-since those credentials are no longer valid for this job once it does.
+writes `HUMAN_WAIT_COMPLETE` and touches nothing else (0.8.5) -
+`rdp_host`/`rdp_username`/`rdp_password` and `human_wait_deadline` are left
+exactly as `set_human_wait()` wrote them, so a poller or an audit trail can
+see which RDS machine and login a completed job used. The status change to
+`COMPLETE` is itself the cue for the toolkit to disconnect the RDP session
+- the RDP columns are not repurposed as a second signal, and their
+plaintext values keep sitting in the database until something eventually
+calls `clear_human_wait()`.
 `HUMAN_WAIT_COMPLETE` is a **deliberately persistent terminal state**
 (0.8.4) - a caller must **not** also call `clear_human_wait()` immediately
 after a success, since that would erase the very signal a poller is meant
@@ -208,7 +213,9 @@ poller must never read `HUMAN_WAIT_COMPLETE` for a login that didn't
 actually succeed; a caller with its own reason to eventually reset a
 completed row back to `NULL` (once its downstream consumer has finished
 reacting, say) may still call `clear_human_wait()` itself for that, just
-not as an automatic follow-up to `set_human_wait_complete()`.
+not as an automatic follow-up to `set_human_wait_complete()` - this is
+also the only thing that ever nulls a completed row's plaintext RDP
+credential, so something should call it eventually.
 
 Neither `set_human_wait()`, `set_human_wait_complete()`, nor
 `clear_human_wait()` raises on its own for a missing column - if the
@@ -592,18 +599,26 @@ ALTER TABLE dbo.ODC_jobs ADD
    never reads `ODC_jobs` for this).
 3. On confirmed success, **`set_human_wait_complete()`** writes
    `human_wait_status = 'COMPLETE'` (`jobstodo.HUMAN_WAIT_COMPLETE`) and
-   nulls `rdp_host`/`rdp_username`/`rdp_password` - the cue for the toolkit
-   to disconnect the RDP session, since those credentials are no longer
-   valid for this job once it does. `COMPLETE` is a **persistent terminal
-   state** (0.8.4): the caller must not also call `clear_human_wait()`
-   right after this, since a poller needs to be able to observe `COMPLETE`
-   without racing a fixed time budget before it disappears.
+   touches nothing else (0.8.5) - `rdp_host`/`rdp_username`/`rdp_password`
+   and `human_wait_deadline` are left exactly as `set_human_wait()` wrote
+   them. The status change to `COMPLETE` is itself the cue for the toolkit
+   to disconnect the RDP session; the RDP columns keep their plaintext
+   values (for a poller/audit trail to see which machine and login a
+   completed job used) until something eventually calls
+   `clear_human_wait()`. `COMPLETE` is a **persistent terminal state**
+   (0.8.4): the caller must not also call `clear_human_wait()` right after
+   this, since a poller needs to be able to observe `COMPLETE` without
+   racing a fixed time budget before it disappears.
 4. **`clear_human_wait()`** nulls all five columns, including
-   `human_wait_status` itself, on a failure or timeout exit only - one
-   where step 3 was never reached, so the row is still at `PENDING_HUMAN`.
-   There is nothing worth keeping on that path, so it resets straight to
-   `NULL` rather than lingering. (Before 0.8.4 this ran unconditionally on
-   every exit path, clearing a successful `COMPLETE` back to `NULL` moments
+   `human_wait_status` itself, on a failure or timeout exit - one where
+   step 3 was never reached, so the row is still at `PENDING_HUMAN`. There
+   is nothing worth keeping on that path, so it resets straight to `NULL`
+   rather than lingering. It is also the only mechanism that ever nulls a
+   `HUMAN_WAIT_COMPLETE` row's plaintext RDP credential, for a caller that
+   wants one eventually cleared - as of 0.8.5 nothing does this
+   automatically on a success path (see spec history: before 0.8.4 this ran
+   unconditionally on every exit path, clearing a successful `COMPLETE`
+   back to `NULL` moments
    later - found in live testing to leave pollers too small a window to
    reliably observe it.)
 
@@ -622,12 +637,17 @@ Column notes:
   than read from static config. Stored in plaintext, matching the existing
   portal-credential pattern in `ODC_credentials`/`ODC_job_details`; treat
   this as a genuinely higher-privilege credential than a portal login (RDP
-  access to a machine, not a single supplier website) - `set_human_wait_complete()`
-  nulls these as soon as the wait concludes successfully (whether or not
-  `clear_human_wait()` is ever called afterward, since `COMPLETE` now
-  persists), and `clear_human_wait()` nulls them again on a failure/timeout
-  exit, so the plaintext-in-Titan exposure window is no longer than the
-  wait itself, and often shorter.
+  access to a machine, not a single supplier website). As of 0.8.5,
+  `set_human_wait_complete()` leaves these untouched (an explicit choice -
+  a completed job's RDS machine/login stays visible for as long as
+  `HUMAN_WAIT_COMPLETE` persists, for audit purposes or a toolkit that
+  needs to re-confirm which session to close); only `clear_human_wait()`
+  ever nulls them, on a failure/timeout exit. Since `HUMAN_WAIT_COMPLETE` is
+  a persistent terminal state that nothing clears automatically (see
+  above), the plaintext RDP password on a successfully completed row can
+  sit in Titan indefinitely unless a caller separately calls
+  `clear_human_wait()` itself once it is done with the row - this is a
+  known, deliberate tradeoff, not an oversight.
 - All three functions raise the underlying `pyodbc.Error` if these columns
   don't exist yet on the target database (this is an additive, opt-in
   schema change - see the DDL above); callers should treat that as "no

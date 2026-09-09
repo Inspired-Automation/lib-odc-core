@@ -95,14 +95,18 @@ _CLEAR_PROCESS_ID = "UPDATE {jobs} SET process_id = NULL WHERE id = ?"
 #: human_wait_status moves through these states:
 #:   NULL -> HUMAN_WAIT_PENDING -> HUMAN_WAIT_COMPLETE (terminal)
 #:                              -> NULL (failure/timeout, HUMAN_WAIT_COMPLETE skipped)
-#: set_human_wait() writes HUMAN_WAIT_PENDING (the cue for a poller's
-#: toolkit to open the RDP session using rdp_host/rdp_username/
-#: rdp_password). Detecting that the human has actually finished logging in
-#: is the caller's own concern, not this library's - e.g. an in-page
-#: confirm button or a post-login URL check polled from the caller's own
-#: wait loop. Once the caller's wait loop confirms success, it calls
-#: set_human_wait_complete(), which writes HUMAN_WAIT_COMPLETE and nulls
-#: the RDP columns - the cue for the toolkit to disconnect.
+#: set_human_wait() writes HUMAN_WAIT_PENDING plus rdp_host/rdp_username/
+#: rdp_password - the cue for a poller's toolkit to open the RDP session.
+#: Detecting that the human has actually finished logging in is the
+#: caller's own concern, not this library's - e.g. an in-page confirm
+#: button or a post-login URL check polled from the caller's own wait
+#: loop. Once the caller's wait loop confirms success, it calls
+#: set_human_wait_complete(), which writes HUMAN_WAIT_COMPLETE and touches
+#: nothing else (0.8.5 - see spec §4.2) - rdp_host/rdp_username/
+#: rdp_password and human_wait_deadline are left exactly as set_human_wait()
+#: wrote them, deliberately, so a poller/audit trail can see which machine
+#: and login a completed job used. The status change alone is the cue to
+#: disconnect; the RDP columns are not repurposed as a second signal.
 #: HUMAN_WAIT_COMPLETE is a deliberately persistent terminal state, not a
 #: transient one - a caller should NOT also call clear_human_wait() right
 #: after a success (see human_in_loop.wait_for_human_login(), which does
@@ -113,7 +117,9 @@ _CLEAR_PROCESS_ID = "UPDATE {jobs} SET process_id = NULL WHERE id = ?"
 #: all - there is nothing worth keeping, so the row resets straight to
 #: NULL. A caller that genuinely wants to reset a HUMAN_WAIT_COMPLETE row
 #: back to NULL later (e.g. once its own downstream consumer has finished
-#: reacting to it) may still call clear_human_wait() itself for that.
+#: reacting to it) may still call clear_human_wait() itself for that -
+#: that is also the only mechanism that ever nulls a completed row's
+#: plaintext RDP credential, so something should call it eventually.
 HUMAN_WAIT_PENDING = "PENDING_HUMAN"
 HUMAN_WAIT_COMPLETE = "COMPLETE"
 
@@ -124,11 +130,7 @@ _SET_HUMAN_WAIT = (
     "WHERE id = ?"
 )
 
-_SET_HUMAN_WAIT_COMPLETE = (
-    "UPDATE {jobs} SET human_wait_status = ?, "
-    "rdp_host = NULL, rdp_username = NULL, rdp_password = NULL "
-    "WHERE id = ?"
-)
+_SET_HUMAN_WAIT_COMPLETE = "UPDATE {jobs} SET human_wait_status = ? WHERE id = ?"
 
 _CLEAR_HUMAN_WAIT = (
     "UPDATE {jobs} SET human_wait_status = NULL, "
@@ -350,13 +352,18 @@ def set_human_wait(
 def set_human_wait_complete(job_id: str, tables: dict, dsn: str) -> None:
     """Mark a human-assisted login as finished - a persistent terminal state.
 
-    Sets human_wait_status to HUMAN_WAIT_COMPLETE and nulls
-    rdp_host/rdp_username/rdp_password - the cue for a poller's toolkit to
-    disconnect the RDP session, since those credentials are no longer valid
-    for this job once it disconnects them. Distinct from clear_human_wait():
-    this leaves human_wait_status itself non-NULL (COMPLETE, not cleared) so
-    a poller can tell "just finished, go disconnect" apart from "nothing
-    happening here."
+    Sets human_wait_status to HUMAN_WAIT_COMPLETE and touches nothing else
+    (0.8.5) - rdp_host/rdp_username/rdp_password and human_wait_deadline are
+    left exactly as set_human_wait() wrote them, deliberately, so a poller
+    or an audit trail can see which RDS machine and login a completed job
+    used. The status change to COMPLETE is itself the cue for a poller's
+    toolkit to disconnect the RDP session - the RDP columns are not
+    repurposed as a second signal, and their plaintext values keep sitting
+    in the database until something eventually calls clear_human_wait()
+    (see that function's docstring; this call alone never does).
+    Distinct from clear_human_wait(): this leaves human_wait_status itself
+    non-NULL (COMPLETE, not cleared) so a poller can tell "just finished, go
+    disconnect" apart from "nothing happening here."
 
     Call this only after the caller's own wait loop has confirmed the human
     actually finished logging in - never on a failure or timeout exit path,

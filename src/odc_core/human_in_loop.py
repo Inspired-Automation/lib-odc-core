@@ -317,12 +317,14 @@ def wait_for_human_login(
          _poll_until_logged_in()'s docstring for why `is_logged_in(page)` is
          diagnostic-only here rather than an equal, independent trigger.
       3. On success: shows a "taking over" banner, clears the confirm
-         button, calls jobstodo.set_human_wait_complete() (nulls the RDP
-         columns - the cue for the toolkit to disconnect), then sleeps
+         button, calls jobstodo.set_human_wait_complete() (writes
+         human_wait_status=COMPLETE - the cue for the toolkit to disconnect
+         - and touches nothing else: rdp_host/rdp_username/rdp_password are
+         left exactly as set_human_wait() wrote them), then sleeps
          TAKEOVER_PAUSE_S before returning True, giving the human a moment
-         to read the banner and stop interacting. human_wait_status is left
-         at COMPLETE - jobstodo.clear_human_wait() is deliberately NOT
-         called on this path (see step 4), so a poller can observe COMPLETE
+         to read the banner and stop interacting. jobstodo.clear_human_wait()
+         is deliberately NOT called on this path (see step 4), so a poller
+         can observe COMPLETE - and the RDP details a completed job used -
          for as long as it needs rather than racing a fixed window.
       4. jobstodo.clear_human_wait() runs in a finally, but only fires when
          `success` is False - a genuine failure, a timeout, or an exception

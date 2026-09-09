@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.8.5] - 2026-09-09
+### Changed
+- `jobstodo.set_human_wait_complete()` no longer nulls `rdp_host`/
+  `rdp_username`/`rdp_password` - it now only writes
+  `human_wait_status = 'COMPLETE'`, leaving those columns (and
+  `human_wait_deadline`) exactly as `set_human_wait()` wrote them. Found
+  while testing v0.8.4: with `COMPLETE` now a persistent state, the RDP
+  fields being nulled in the same update meant a completed row showed
+  `COMPLETE` with the RDP details already gone, which the poller/audit use
+  case needs visible. Requested directly: only `human_wait_status` should
+  change once the reCAPTCHA is resolved; nothing else gets cleared.
+  **Security note**: this means a successfully completed row's plaintext
+  RDP password can now sit in Titan indefinitely, since nothing clears it
+  automatically once `set_human_wait_complete()` runs - only
+  `clear_human_wait()` still nulls it, and that is no longer called
+  automatically on a success path (since 0.8.4). A caller that wants the
+  credential eventually removed needs to call `clear_human_wait()` itself
+  once it's done with the row.
+
 ## [0.8.4] - 2026-09-09
 ### Changed
 - `human_in_loop.wait_for_human_login()` no longer calls
