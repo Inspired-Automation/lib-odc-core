@@ -18,6 +18,7 @@ from . import (
     file_allocation,
     file_save_as,
     graph_client,
+    human_in_loop,
     jobstodo,
     pdf_auto_copy,
     sugar_client,
@@ -25,7 +26,7 @@ from . import (
     validate_username,
 )
 
-__version__ = "0.8.0"
+__version__ = "0.8.1"
 
 __all__ = [
     "browser_helpers",
@@ -34,6 +35,7 @@ __all__ = [
     "file_allocation",
     "file_save_as",
     "graph_client",
+    "human_in_loop",
     "jobstodo",
     "pdf_auto_copy",
     "sugar_client",

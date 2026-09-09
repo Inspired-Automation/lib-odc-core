@@ -43,8 +43,19 @@ for detail in job_details:
 ## What's in here
 
 - `jobstodo.py` - claim a job (`ODC_jobs.process_id`), fetch pending/searchable
-  `ODC_job_details` rows (joined to `ODC_scrape_accounts` for `sug_internal_id`),
-  revert/clear a claim, look up multi-credential rows.
+  `ODC_job_details` rows (joined to `ODC_scrape_accounts` for `sug_internal_id`
+  and left-joined to `ODC_suppliers` for `human_in_loop`), revert/clear a
+  claim, look up multi-credential rows. Also owns the job-level
+  human-assisted-login signal on `ODC_jobs`: `set_human_wait()` /
+  `set_human_wait_complete()` / `clear_human_wait()` - see `human_in_loop.py`
+  below for the higher-level entry point most callers should use instead.
+- `human_in_loop.py` - `wait_for_human_login()`: the full human-assisted-login
+  mechanism for any supplier flagged by `ODC_suppliers.human_in_loop` - an
+  on-page banner, an injected "I'm logged in" confirm button, a poll loop,
+  and the `jobstodo` DB signal lifecycle around it, all in one call. The
+  caller supplies `is_logged_in(page) -> bool`, the one genuinely
+  portal-specific piece (each supplier's post-login marker differs).
+  Generalised out of `automation-odc-energia`'s Phase 3.
 - `file_allocation.py` - work out the target folder/filename for a downloaded
   invoice from `ODC_jobs`/`ODC_job_details` fields. For Inspired PLC, resolves
   the company folder name from SugarCRM via `sugar_client` and `sug_internal_id`
@@ -103,8 +114,8 @@ database:
   dsn: Jupiter
 
 tables:
-  dev:  {jobs: ..., job_details: ..., scrape_data: ..., scrape_accounts: ..., web_scrape_data: ..., multi_credential: ..., credential: ..., db_name: ...}
-  live: {jobs: ..., job_details: ..., scrape_data: ..., scrape_accounts: ..., web_scrape_data: ..., multi_credential: ..., credential: ..., db_name: ...}
+  dev:  {jobs: ..., job_details: ..., scrape_data: ..., scrape_accounts: ..., suppliers: ..., web_scrape_data: ..., multi_credential: ..., credential: ..., db_name: ...}
+  live: {jobs: ..., job_details: ..., scrape_data: ..., scrape_accounts: ..., suppliers: ..., web_scrape_data: ..., multi_credential: ..., credential: ..., db_name: ...}
 
 graph:
   client_id:

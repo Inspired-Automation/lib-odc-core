@@ -2,10 +2,12 @@
 
 ## Purpose
 Shared ODC (Online Data Collection) infrastructure library. Provides job claiming,
-file allocation/save, job-status updates, Microsoft Graph mail/OTP helpers, and
-browser-automation pacing helpers used by every ODC supplier bot project
-(`automation-odc-wave`, `automation-odc-british-gas`, and future suppliers).
-This is a library, not a Control Room bot - it has no entry point of its own.
+file allocation/save, job-status updates, Microsoft Graph mail/OTP helpers,
+browser-automation pacing helpers, and a generalised human-assisted-login
+mechanism (`human_in_loop.py`, 0.8.1) used by every ODC supplier bot project
+(`automation-odc-wave`, `automation-odc-british-gas`, `automation-odc-energia`,
+and future suppliers). This is a library, not a Control Room bot - it has no
+entry point of its own.
 
 ## Tech Stack
 - Python 3.14
@@ -19,15 +21,36 @@ This is a library, not a Control Room bot - it has no entry point of its own.
   calling project owns `config.yaml` and passes these in. In practice all
   current callers use `DSN=Jupiter` against `Titan_INSE_DEV`/`Titan_INSE`
   tables: `ODC_jobs`, `ODC_job_details`, `ODC_scrape_data`,
-  `ODC_scrape_accounts`, `ODC_multi_credentials`, `ODC_credentials`, plus
-  `jupiter.aa_dev.web_scrape_data` / `jupiter.aa.web_scrape_data` (an older
-  parallel pipeline consulted only for `client_name == "inspired plc"`
-  duplicate checks), and the stored procedure `spODC_job_details_UpdateStatus`.
-  `ODC_jobs` also carries three columns added in 0.8.0 -
-  `human_wait_status`/`human_wait_started_at`/`human_wait_deadline` - written
-  only by `jobstodo.set_human_wait()`/`clear_human_wait()`; see spec §4.2 and
-  Outstanding TODOs (the DDL to add them is requested, not yet confirmed
-  applied).
+  `ODC_scrape_accounts`, `ODC_suppliers`, `ODC_multi_credentials`,
+  `ODC_credentials`, plus `jupiter.aa_dev.web_scrape_data` /
+  `jupiter.aa.web_scrape_data` (an older parallel pipeline consulted only
+  for `client_name == "inspired plc"` duplicate checks), and the stored
+  procedure `spODC_job_details_UpdateStatus`.
+  `ODC_jobs` also carries five columns added in 0.8.0/0.8.1 -
+  `human_wait_status`/`human_wait_deadline` (0.8.0) and
+  `rdp_host`/`rdp_username`/`rdp_password` (0.8.1, plaintext RDS
+  connection details for the human-assisted RDP session) - written only by
+  `jobstodo.set_human_wait()`/`set_human_wait_complete()`/`clear_human_wait()`;
+  see spec §4.2. **Confirmed applied to both `Titan_INSE_DEV` and the live
+  `Titan_INSE`** (queried directly 2026-09-09 via `INFORMATION_SCHEMA.COLUMNS`).
+  One discrepancy from what this repo's DDL specifies:
+  `human_wait_status` was actually created as `VARCHAR(50)`, not
+  `NVARCHAR(30)` - functionally fine for the short ASCII status values this
+  library writes, just noting the drift; the three `rdp_*` columns and
+  `human_wait_deadline` match exactly.
+  A sixth column, `human_wait_started_at`, was part of the original 0.8.0
+  design but dropped before any DDL request went out - nothing reads it (and
+  it does not exist on `Titan_INSE_DEV` either), so only `human_wait_deadline`
+  is kept.
+- `ODC_suppliers` (pre-existing, not owned by this library) carries
+  `human_in_loop` (nullable `tinyint`) - a **per-supplier**, not per-job,
+  flag for "does this supplier's login require a human". Confirmed on both
+  `Titan_INSE_DEV` and the live `Titan_INSE` 2026-09-09: only the `Energia`
+  row has it set to `1`; every other supplier row is `NULL`.
+  `jobstodo.get_job_details()` (0.8.1)
+  left-joins this table on `ODC_jobs.supplier_id` and returns
+  `human_in_loop` on every row - see spec §4.3 and the new `human_in_loop`
+  module below.
 - `sugar_client.py` (added 0.7.0) is the one module that talks to a second,
   unrelated database: SugarCRM itself (`DSN=Sugar Corp`, MySQL), read-only,
   looking up `accounts.NAME` by id. Not Titan, not Jupiter - a caller must
@@ -89,6 +112,16 @@ This is a library, not a Control Room bot - it has no entry point of its own.
   other error surface on the first attempt. Replaying is safe for the units in
   this package because a transient SQLSTATE means nothing was committed; check
   that before wrapping a partially-committed multi-statement unit.
+- Human-assisted login (0.8.1): a supplier checks `human_in_loop` on any row
+  `jobstodo.get_job_details()` returns (left-joined from `ODC_suppliers`,
+  §4.3) and, if truthy, calls `human_in_loop.wait_for_human_login()` instead
+  of driving its own login. That one call owns the entire lifecycle - the
+  on-page banner and confirm button, the poll loop, and the
+  `jobstodo.set_human_wait()`/`set_human_wait_complete()`/`clear_human_wait()`
+  sequencing - so a supplier project only has to supply `is_logged_in(page)`,
+  its own portal-specific "did the login succeed" check. Generalised out of
+  `automation-odc-energia`'s Phase 3, the only current `human_in_loop=1`
+  supplier.
 
 ## Known Gotchas
 - The original per-supplier framework hardcoded Graph `client_id`/`client_secret`/
@@ -122,6 +155,15 @@ This is a library, not a Control Room bot - it has no entry point of its own.
   results for every supplier - confirmed acceptable because every current row
   is expected to have a match, but worth checking first if a future supplier's
   data does not guarantee that.
+- **Breaking for every existing caller, not just human-wait/RDP suppliers**:
+  `jobstodo._SELECT_JOB_DETAILS`'s new join to `ODC_suppliers` (0.8.1, for
+  `human_in_loop`) needs `tables["suppliers"]`. Unlike the `scrape_accounts`
+  join above, this one is a LEFT JOIN deliberately - a job row with no
+  matching supplier row still comes back (with `human_in_loop` as `None`)
+  rather than being silently dropped, so it does not repeat that gotcha. But
+  every supplier project's `config.yaml` still needs a new `tables.suppliers:
+  ODC_suppliers` key before upgrading, or `get_job_details()` raises
+  `KeyError: 'suppliers'` immediately - see Outstanding TODOs.
 - `REQUIRES RETRY` and `MISSING PARENT` are validated by `VALID_STATUSES` and
   written to the database, but nothing in the current estate resets a row in
   either status back to `pending`. `jobstodo.get_job_details()` only
@@ -129,8 +171,89 @@ This is a library, not a Control Room bot - it has no entry point of its own.
   these two statuses to mean "try again on a later run" needs its own
   reset mechanism (or to run as a multi-credential job, whose status filter
   does not exclude them); today no such mechanism exists.
+- `jobstodo.set_human_wait()` (0.8.1) writes `rdp_host`/`rdp_username`/
+  `rdp_password` to `ODC_jobs` in plaintext - consistent with how portal
+  credentials are already stored in `ODC_credentials`/`ODC_job_details`, but
+  an RDS machine login is a higher-privilege credential than a single
+  supplier portal login. `set_human_wait_complete()` nulls the three RDP
+  columns as soon as a wait concludes successfully, and `clear_human_wait()`
+  nulls everything again on every exit path regardless - but a caller that
+  skips both (crash before the `finally`, process killed) leaves a live RDP
+  credential sitting in Titan until someone notices and clears it manually -
+  there is no separate expiry/sweep job today.
+- Detecting that a human has actually finished a human-assisted login is
+  deliberately outside `jobstodo`'s scope - `set_human_wait_complete()` only
+  records that it happened, it never detects it itself. As of 0.8.1 this
+  detection is the one thing `human_in_loop.wait_for_human_login()` still
+  cannot generalise: the caller supplies `is_logged_in(page)`, a
+  portal-specific check (e.g. `automation-odc-energia`'s
+  `_post_login_reached()`, a post-login URL marker). A caller passing an
+  `is_logged_in` that returns `True` too early would cause a poller to
+  disconnect an RDP session mid-login - neither `jobstodo` nor
+  `human_in_loop` can guard against that misuse.
 
 ## Change Log
+- 2026-09-09: v0.8.1 (cont.) - generalised `automation-odc-energia`'s Phase 3
+  human-assisted-login mechanism into two new pieces, so any supplier can use
+  it instead of only Energia:
+  - New `human_in_loop` module: `wait_for_human_login(page, is_logged_in,
+    job_id, timeout_s, rdp_host, rdp_username, rdp_password, tables, dsn,
+    config) -> bool`. Owns the on-page banner, an injected "I'm logged in"
+    confirm button (a plain JS flag read via `page.evaluate()`, not
+    `page.expose_function()`), the poll loop, and the full
+    `jobstodo.set_human_wait()`/`set_human_wait_complete()`/`clear_human_wait()`
+    sequencing - a caller supplies only `is_logged_in(page)`, the one
+    genuinely portal-specific piece. See spec §3.2a.
+  - `jobstodo.get_job_details()` now left-joins the pre-existing
+    `ODC_suppliers` table on `supplier_id` and returns its `human_in_loop`
+    column (nullable `tinyint`) on every row, so a caller can decide whether
+    to call `human_in_loop.wait_for_human_login()` without a separate query.
+    **Breaking for every existing caller**, not only human-wait/RDP
+    suppliers: `tables` now requires a `suppliers` key. See spec §4.3 and
+    the new Known Gotchas entry - unlike the `scrape_accounts` join, this
+    one is a LEFT JOIN, so a job with no matching supplier row still comes
+    back rather than being silently excluded.
+  - Confirmed while building this, by querying `INFORMATION_SCHEMA.COLUMNS`
+    directly: the 0.8.0/0.8.1 `human_wait_*`/`rdp_*` DDL (§4.2) is already
+    applied to **both** `Titan_INSE_DEV` and the live `Titan_INSE` - the
+    "not yet confirmed applied" language throughout the spec/Outstanding
+    TODOs predates this and is now stale, cleaned up below. One drift from
+    what this repo's DDL specifies: `human_wait_status` was created as
+    `VARCHAR(50)`, not `NVARCHAR(30)` - harmless for the short values
+    written here. Also confirmed `ODC_scrape_accounts.sug_internal_id`
+    (0.7.0) on both databases, resolving that separate Outstanding TODO too.
+- 2026-09-09: v0.8.1 - three changes to the 0.8.0 human-wait signal, none
+  released yet so all folded into one version:
+  - `jobstodo.set_human_wait()` gains three new **required** parameters,
+    `rdp_host`/`rdp_username`/`rdp_password` (inserted between `timeout_s`
+    and `tables` - a breaking signature change from 0.8.0), written to three
+    more nullable `ODC_jobs` columns of the same name. The human-assisted-login
+    signal from 0.8.0 needed these to be usable at all: the login session it
+    signals for is itself an RDP session onto a per-job RDS machine, and the
+    polling toolkit had no way to learn which machine or login to use.
+    Stored in plaintext, matching the existing `ODC_credentials`/
+    `ODC_job_details` pattern - see the new Known Gotchas entry about that
+    being a higher-privilege credential than a portal login.
+  - `human_wait_status`'s vocabulary changes from a single `WAITING_FOR_HUMAN`
+    sentinel to a three-state lifecycle: `NULL` -> `jobstodo.HUMAN_WAIT_PENDING`
+    (`"PENDING_HUMAN"`, written by `set_human_wait()`) -> new function
+    `jobstodo.set_human_wait_complete()`'s `jobstodo.HUMAN_WAIT_COMPLETE`
+    (`"COMPLETE"`, which also nulls the three RDP columns - the cue for a
+    poller's toolkit to disconnect the RDP session) -> `NULL` (`clear_human_wait()`,
+    called on every exit path regardless of whether `set_human_wait_complete()`
+    was reached). Detecting that the human actually finished logging in stays
+    entirely outside this library - see the new Known Gotchas entry.
+  - Drops `human_wait_started_at` (unused - nothing ever read it; only the
+    deadline matters for the timeout decision) before any DDL request went
+    out for it.
+  - All folded into one combined, still-not-yet-applied `ALTER TABLE` with
+    0.8.0's other two columns (see spec §4.2 and Outstanding TODOs), since
+    nothing had shipped to a real database yet. No consumer needs a
+    compatibility shim - v0.8.0's wheel was never cut - but
+    `automation-odc-energia` Phase 3's call site and its own
+    `docs/energia-human-assisted-login-control-room-contract.md` (which
+    still documents the old `WAITING_FOR_HUMAN`-only, two-state design) need
+    updating before it can take this version.
 - 2026-09-07: v0.8.0 - added `jobstodo.set_human_wait()`/`clear_human_wait()`,
   a job-level "waiting for a human-assisted login" signal on three new
   nullable `ODC_jobs` columns (`human_wait_status`, `human_wait_started_at`,
@@ -191,16 +314,49 @@ This is a library, not a Control Room bot - it has no entry point of its own.
   does not exist and made the documented `pip install` URLs 404).
 
 ## Outstanding TODOs
-- Request/confirm the `ODC_jobs` schema change for v0.8.0 (three nullable
-  columns - see spec §4.2) against both `Titan_INSE_DEV` and `Titan_INSE`.
-  `set_human_wait()`/`clear_human_wait()` will raise `pyodbc.Error` (invalid
-  column) until this lands; `automation-odc-energia`'s own call sites already
-  tolerate that (log-and-continue), but the signal has no effect until the
-  columns exist.
-- Cut a `v0.8.0` release with the built wheel attached, following
-  `RELEASING.md`. Additive/backward-compatible - no other supplier bot needs
-  to bump immediately, but `automation-odc-energia` needs it to pick up
-  `set_human_wait`/`clear_human_wait`.
+- **Every supplier project's `config.yaml` needs a new `tables.suppliers:
+  ODC_suppliers` key before upgrading to v0.8.1** - breaking for every
+  caller of `jobstodo.get_job_details()`, not only human-wait/RDP suppliers
+  (see the new Known Gotchas entry). At least `automation-odc-wave`,
+  `automation-odc-british-gas`, `automation-odc-crown-gas-and-power-ltd`,
+  `automation-odc-totalenergies-gas-power-ltd`,
+  `automation-odc-castle-water-ltd`, `automation-odc-source-for-business`,
+  and `automation-odc-energia` all call it today.
+- Retroactively confirm the plaintext storage of
+  `rdp_host`/`rdp_username`/`rdp_password` on `ODC_jobs` (already applied to
+  both `Titan_INSE_DEV` and `Titan_INSE` - see Databases above) is
+  acceptable to whoever owns Titan security/compliance - it is a
+  higher-privilege credential (RDP access to a machine) than the portal
+  logins already stored in `ODC_credentials`, even though it follows the
+  same plaintext pattern.
+- Migrate `automation-odc-energia` Phase 3 to v0.8.1, ideally by adopting
+  the new `human_in_loop.wait_for_human_login()` wholesale instead of
+  keeping its own local banner/button/poll-loop implementation (which this
+  version generalised out of that exact code) - no compatibility shim
+  exists since 0.8.0 was never released:
+  - Its own `_show_banner()`/`_inject_login_confirm_button()`/
+    `_login_confirmed_by_button()`/`_clear_login_confirm_button()`/
+    `wait_for_human_login()` in `energia_supplier.py` become redundant;
+    `main.py` would call `human_in_loop.wait_for_human_login()` directly,
+    passing `_post_login_reached()` as `is_logged_in`.
+  - Either way, `main.py`'s existing `set_human_wait()` call site needs the
+    new signature (`rdp_host`/`rdp_username`/`rdp_password` inserted between
+    `timeout_s` and `tables`), and needs `tables["suppliers"]` per the
+    bullet above.
+  - `docs/energia-human-assisted-login-control-room-contract.md` documents
+    the old two-state (`WAITING_FOR_HUMAN`/`NULL`) design and the old
+    `set_human_wait(job_id, timeout_s, tables, dsn)` signature throughout -
+    needs a rewrite for the new `PENDING_HUMAN`/`COMPLETE`/`NULL` lifecycle,
+    the `rdp_*` columns, and the RDP-based join mechanism (the contract as
+    written still describes noVNC as the transport, not RDP).
+- Cut a `v0.8.1` release with the built wheel attached, following
+  `RELEASING.md` - the DDL is already confirmed applied to both databases
+  (see Databases above), so that former blocker is clear. No supplier bot
+  has taken a dependency on 0.8.0 yet (its wheel was never cut), so 0.8.1 is
+  the first real release since 0.7.0. `automation-odc-energia` needs it for
+  human-assisted login; every other current caller of
+  `jobstodo.get_job_details()` also needs it (for the `tables.suppliers`
+  config change above) before it can pull in any future release at all.
 - Cut a `v0.7.0` release with the built wheel attached, following
   `RELEASING.md`. Any supplier project whose jobs can carry
   `client_name == "inspired plc"` rows (at least `automation-odc-wave` and
@@ -210,10 +366,6 @@ This is a library, not a Control Room bot - it has no entry point of its own.
   through to `allocate()`, before the SugarCRM-based folder naming actually
   takes effect for them - until then they keep the old `customer_name`
   fallback behaviour.
-- Confirm `ODC_scrape_accounts.sug_internal_id` actually exists in both
-  `Titan_INSE_DEV` and `Titan_INSE` with that exact column name before
-  releasing v0.7.0 - it was assumed present per the SugarCRM/Titan sync, not
-  verified against the live schema from this repo.
 - Cut a `v0.6.0` release with the built wheel attached, following
   `RELEASING.md`. Only `automation-odc-edf-energy` needs to pin `v0.6.0`
   (it is the only consumer of the two new statuses so far); every other

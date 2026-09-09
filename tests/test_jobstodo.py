@@ -6,6 +6,7 @@ TABLES = {
     "jobs": "ODC_jobs",
     "job_details": "ODC_job_details",
     "scrape_accounts": "ODC_scrape_accounts",
+    "suppliers": "ODC_suppliers",
     "multi_credential": "ODC_multi_credentials",
     "credential": "ODC_credentials",
 }
@@ -85,6 +86,9 @@ def test_get_job_details_single_credential_pending_only(mock_connect):
     assert any("pending" in sql for sql in executed_sql)
     assert any("ODC_scrape_accounts" in sql for sql in executed_sql)
     assert any("sug_internal_id" in sql for sql in executed_sql)
+    assert any("ODC_suppliers" in sql for sql in executed_sql)
+    assert any("human_in_loop" in sql for sql in executed_sql)
+    assert any("LEFT JOIN" in sql for sql in executed_sql)
 
 
 @patch("odc_core.db.pyodbc.connect")
@@ -148,19 +152,42 @@ def test_clear_job_claim_commits(mock_connect):
 
 
 @patch("odc_core.db.pyodbc.connect")
-def test_set_human_wait_commits_with_status_timeout_and_job_id(mock_connect):
+def test_set_human_wait_commits_with_status_timeout_rdp_and_job_id(mock_connect):
     cursor = MagicMock()
     conn = _connect_mock(cursor)
     mock_connect.return_value = conn
 
-    jobstodo.set_human_wait("JOB1", 600, TABLES, "Jupiter")
+    jobstodo.set_human_wait("JOB1", 600, "RDS01", "rdpuser", "rdppass", TABLES, "Jupiter")
 
     cursor.execute.assert_called_once()
     sql, params = cursor.execute.call_args.args[0], cursor.execute.call_args.args[1:]
     assert "human_wait_status" in sql
-    assert "human_wait_started_at" in sql
     assert "human_wait_deadline" in sql
-    assert params == (jobstodo.HUMAN_WAIT_STATUS, 600, "JOB1")
+    assert "rdp_host" in sql
+    assert "rdp_username" in sql
+    assert "rdp_password" in sql
+    assert params == (
+        jobstodo.HUMAN_WAIT_PENDING, 600, "RDS01", "rdpuser", "rdppass", "JOB1",
+    )
+    conn.commit.assert_called_once()
+
+
+@patch("odc_core.db.pyodbc.connect")
+def test_set_human_wait_complete_commits_and_nulls_rdp_fields(mock_connect):
+    cursor = MagicMock()
+    conn = _connect_mock(cursor)
+    mock_connect.return_value = conn
+
+    jobstodo.set_human_wait_complete("JOB1", TABLES, "Jupiter")
+
+    cursor.execute.assert_called_once()
+    sql, params = cursor.execute.call_args.args[0], cursor.execute.call_args.args[1:]
+    assert "human_wait_status" in sql
+    assert "rdp_host = NULL" in sql
+    assert "rdp_username = NULL" in sql
+    assert "rdp_password = NULL" in sql
+    assert "human_wait_deadline" not in sql
+    assert params == (jobstodo.HUMAN_WAIT_COMPLETE, "JOB1")
     conn.commit.assert_called_once()
 
 
@@ -175,5 +202,8 @@ def test_clear_human_wait_commits(mock_connect):
     cursor.execute.assert_called_once()
     sql, params = cursor.execute.call_args.args[0], cursor.execute.call_args.args[1:]
     assert "human_wait_status = NULL" in sql
+    assert "rdp_host = NULL" in sql
+    assert "rdp_username = NULL" in sql
+    assert "rdp_password = NULL" in sql
     assert params == ("JOB1",)
     conn.commit.assert_called_once()

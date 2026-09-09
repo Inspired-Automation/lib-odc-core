@@ -7,6 +7,60 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.8.1] - 2026-09-09
+### Changed
+- `jobstodo.set_human_wait()` gains three new **required** parameters -
+  `rdp_host`, `rdp_username`, `rdp_password` - inserted between `timeout_s`
+  and `tables`. This is a breaking signature change from 0.8.0; no consumer
+  had pinned to 0.8.0 yet (its wheel was never cut - see Outstanding TODOs),
+  so nothing downstream needs a compatibility shim, but `automation-odc-energia`
+  Phase 3's call site needs updating before it can take this version.
+- `human_wait_status`'s vocabulary changes from a single `WAITING_FOR_HUMAN`
+  sentinel to a three-state lifecycle - `NULL` -> `jobstodo.HUMAN_WAIT_PENDING`
+  (`"PENDING_HUMAN"`) -> `jobstodo.HUMAN_WAIT_COMPLETE` (`"COMPLETE"`) ->
+  `NULL` - see the new `set_human_wait_complete()` entry below.
+- `jobstodo.get_job_details()` now left-joins the pre-existing `ODC_suppliers`
+  table on `ODC_jobs.supplier_id` and returns its `human_in_loop` column
+  (nullable `tinyint`) on every row. **Breaking for every existing caller**,
+  not only human-wait/RDP suppliers: `tables` now requires a `suppliers` key.
+### Added
+- `ODC_jobs` gains three more nullable columns - `rdp_host`, `rdp_username`,
+  `rdp_password` - written by `set_human_wait()` and cleared by
+  `clear_human_wait()` alongside `human_wait_status`/`human_wait_deadline`.
+  The human-assisted-login signal added in 0.8.0 turned out to need these to
+  be useful at all: the login flow it signals for is itself an RDP session
+  onto a per-job RDS machine, and the polling toolkit has no other way to
+  learn which machine or login to use. Stored in plaintext, the same pattern
+  already used for portal credentials in `ODC_credentials`/
+  `ODC_job_details` - but flagged as a higher-privilege credential than a
+  portal login. Combined with 0.8.0's DDL into one `ALTER TABLE` request -
+  see spec §4.2. Confirmed applied to both `Titan_INSE_DEV` and the live
+  `Titan_INSE` directly via `INFORMATION_SCHEMA.COLUMNS`.
+- `jobstodo.set_human_wait_complete(job_id, tables, dsn)` - writes
+  `human_wait_status = HUMAN_WAIT_COMPLETE` and nulls the three `rdp_*`
+  columns, the cue for a poller's toolkit to disconnect the RDP session.
+  Call it once the caller's own wait loop confirms the human actually
+  finished logging in (detecting that is the caller's concern, not this
+  library's). `clear_human_wait()` still needs calling afterwards on every
+  exit path regardless of whether this new function was reached, exactly as
+  before - it nulls all five columns together, keeping the
+  plaintext-in-Titan window no longer than the wait itself and often
+  shorter now that `set_human_wait_complete()` nulls the RDP fields as soon
+  as the wait concludes successfully.
+- New `human_in_loop` module: `wait_for_human_login(page, is_logged_in,
+  job_id, timeout_s, rdp_host, rdp_username, rdp_password, tables, dsn,
+  config) -> bool`. Generalises `automation-odc-energia`'s Phase 3 mechanism
+  (on-page banner, an injected "I'm logged in" confirm button, a poll loop)
+  for any supplier flagged by the new `human_in_loop` column above, and owns
+  the full `set_human_wait()`/`set_human_wait_complete()`/`clear_human_wait()`
+  sequencing internally - a caller supplies only `is_logged_in(page)`, the
+  one genuinely portal-specific piece (e.g. a post-login URL/DOM marker).
+  See spec §3.2a.
+### Removed
+- `human_wait_started_at` (added in 0.8.0, never applied to a real
+  database) - nothing read it; only `human_wait_deadline` is needed to
+  decide when a wait has timed out.
+
 ## [0.8.0] - 2026-09-07
 ### Added
 - `jobstodo.set_human_wait(job_id, timeout_s, tables, dsn)` /
