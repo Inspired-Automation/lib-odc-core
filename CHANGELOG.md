@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.8.3] - 2026-09-09
+### Fixed
+- `human_in_loop`'s confirm-button signal now uses a DOM attribute
+  (`element.dataset.confirmed`), not a `window.*` global. Found in live
+  testing against `automation-odc-energia` immediately after 0.8.2: a human
+  clicked "I'm logged in" (confirmed by the button's own text visibly
+  updating), but `human_wait_status`/the wait itself never progressed - the
+  heartbeat log kept showing `confirm_button_clicked=False` indefinitely.
+  Root cause: `automation-odc-energia` drives the browser via `patchright`,
+  a stealth-patched Playwright fork used specifically to avoid tripping
+  this portal's reCAPTCHA bot detection. Patches like this commonly route
+  injected scripts (`add_init_script`) through an isolated JS world to hide
+  automation fingerprints from the page. The DOM is shared across worlds
+  (so the button rendered and its own `textContent` update was visible),
+  but a `window.*` global set inside that isolated world is not reliably
+  visible to a separate `page.evaluate()` call reading it back - so the
+  click was genuine but its signal never reached the poll loop. DOM state
+  has no such isolation, so switching the flag to a DOM attribute removes
+  this failure mode regardless of the exact stealth-patching mechanism in
+  use.
+
 ## [0.8.2] - 2026-09-09
 ### Fixed
 - `human_in_loop.wait_for_human_login()`'s poll loop no longer treats

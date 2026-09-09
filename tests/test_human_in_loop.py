@@ -9,7 +9,7 @@ def _page_mock(*, button_confirmed: bool = False) -> MagicMock:
     page = MagicMock()
 
     def evaluate(script, *args):
-        if "__odcHumanLoopConfirmed" in script:
+        if "dataset.confirmed" in script:
             return button_confirmed
         return None
 
@@ -162,6 +162,23 @@ def test_is_logged_in_exception_still_clears_wait_and_propagates(
     assert raised is True
     mock_complete.assert_not_called()
     mock_clear.assert_called_once_with("JOB1", TABLES, "Jupiter")
+
+
+def test_confirm_button_state_uses_dom_not_window_global():
+    # Regression guard: a window.* global set by the click handler is not
+    # reliably visible to a separate page.evaluate() call under stealth
+    # browser-automation patches (e.g. patchright) that isolate injected
+    # scripts into a different JS world than real user interaction. The DOM
+    # is the one thing guaranteed shared across worlds - see this module's
+    # comment above _LOGIN_CONFIRM_BUTTON_JS.
+    assert "window.__odc" not in human_in_loop._LOGIN_CONFIRM_BUTTON_JS
+    assert "dataset.confirmed" in human_in_loop._LOGIN_CONFIRM_BUTTON_JS
+
+    page = MagicMock()
+    human_in_loop._login_confirmed_by_button(page)
+    read_script = page.evaluate.call_args.args[0]
+    assert "window." not in read_script
+    assert "dataset.confirmed" in read_script
 
 
 def test_show_banner_swallows_evaluate_errors():

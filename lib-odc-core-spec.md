@@ -253,10 +253,14 @@ an exception it raises propagates out of `wait_for_human_login()` itself
 What it does, end to end:
 
 1. `jobstodo.set_human_wait(job_id, timeout_s, rdp_host, rdp_username, rdp_password, tables, dsn)`.
-2. Injects a fixed "I'm logged in - continue automation" button (a plain JS
-   flag read back via `page.evaluate()` each tick, not `page.expose_function()`
-   - see the module's own comments for why) and an on-page banner, then
-   polls every 1.5s (`human_in_loop.POLL_INTERVAL_S`) until the button is
+2. Injects a fixed "I'm logged in - continue automation" button (a DOM
+   attribute - `element.dataset.confirmed` - read back via `page.evaluate()`
+   each tick; not `page.expose_function()`, and not a `window.*` global -
+   see the module's own comments above `_LOGIN_CONFIRM_BUTTON_JS` for why:
+   0.8.3 found a `window.*` global unreliable under `automation-odc-energia`'s
+   use of `patchright`, a stealth-patched Playwright fork whose isolated-JS-world
+   script injection shares the DOM but not `window`) and an on-page banner,
+   then polls every 1.5s (`human_in_loop.POLL_INTERVAL_S`) until the button is
    clicked - the sole trigger for success (0.8.2 - see below), logging a
    heartbeat every 20s (`HEARTBEAT_INTERVAL_S`) so a stalled wait is visible
    in the log. `is_logged_in(page)` is called every tick too and included in

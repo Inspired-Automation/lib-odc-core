@@ -203,8 +203,39 @@ entry point of its own.
   defensive against exceptions - one propagates out of
   `wait_for_human_login()` and ends the wait early (see that function's
   docstring).
+- `human_in_loop`'s confirm-button signal (0.8.3) is a DOM attribute
+  (`element.dataset.confirmed`), deliberately not a `window.*` global -
+  `window.__odcHumanLoopConfirmed` was the original 0.8.1 design and broke
+  under `automation-odc-energia`'s use of `patchright` (a stealth-patched
+  Playwright fork it uses to avoid tripping this portal's reCAPTCHA bot
+  detection). Stealth patches like this commonly route injected scripts
+  through an isolated JS world specifically to hide automation fingerprints
+  from the page: the DOM is shared across worlds, but `window.*` globals
+  are not, so a flag set by the click handler in that isolated world was
+  invisible to a separate `page.evaluate()` call reading it back - a
+  genuine click never registered. If any future signal needs adding to this
+  mechanism, keep it DOM-based (an attribute, a class, `textContent`) for
+  the same reason - never add another `window.*` global here.
 
 ## Change Log
+- 2026-09-09: v0.8.3 - fixed `human_in_loop`'s confirm-button signal to use
+  a DOM attribute (`element.dataset.confirmed`) instead of a `window.*`
+  global. Live testing against `automation-odc-energia` immediately after
+  0.8.2 shipped: a human clicked "I'm logged in" (button text visibly
+  updated to "Confirmed..."), but `confirm_button_clicked=False` kept
+  showing in the heartbeat log indefinitely - the click was genuine but its
+  signal never reached the poll loop. Root cause:
+  `automation-odc-energia` drives the browser via `patchright`, a
+  stealth-patched Playwright fork it uses specifically to avoid tripping
+  this portal's reCAPTCHA bot detection - and such patches commonly route
+  injected scripts through an isolated JS world to hide automation
+  fingerprints. The DOM is shared across worlds (the button rendered and
+  updated its own text fine); `window.*` globals are not, so a flag set
+  there by the click handler was invisible to a separate `page.evaluate()`
+  call reading it back. See the new Known Gotchas entry. `is_logged_in()`
+  was unaffected by this bug (it reads `window.location.href`, which
+  reflects real navigation state rather than a custom-set global) - that's
+  why it kept reading `True` correctly while the button state stayed stuck.
 - 2026-09-09: v0.8.2 - fixed `human_in_loop.wait_for_human_login()`'s poll
   loop treating `is_logged_in(page)` as an equal, independent trigger
   alongside the confirm button. v0.8.1 shipped with `if button_confirmed or
@@ -350,14 +381,26 @@ entry point of its own.
   signature - caught, logged, and swallowed by `main.py`'s existing broad
   `except Exception`, so the signal silently never gets written. If
   confirmed, resolved the same way as the migration item below.
-- **Every supplier project's `config.yaml` needs a new `tables.suppliers:
-  ODC_suppliers` key before upgrading to v0.8.2** - breaking for every
-  caller of `jobstodo.get_job_details()`, not only human-wait/RDP suppliers
-  (see the new Known Gotchas entry). At least `automation-odc-wave`,
-  `automation-odc-british-gas`, `automation-odc-crown-gas-and-power-ltd`,
+- ~~Migrate `automation-odc-energia` Phase 3 to the new `human_in_loop`
+  module~~ - **done**: confirmed during 0.8.3 troubleshooting that both
+  `main.py` (calls the new `set_human_wait()` signature via
+  `supplier.wait_for_human_login()`) and `energia_supplier.py` (its
+  `wait_for_human_login()` now delegates to
+  `odc_core.human_in_loop.wait_for_human_login()`, passing
+  `_post_login_reached` as `is_logged_in`) have already been updated, and
+  `config.template.yaml` already has `tables.suppliers` for both `dev` and
+  `live`. This also means the earlier "job 145 blank `human_wait_status`"
+  hypothesis (old 4-arg `set_human_wait()` signature) predates this
+  migration and needs retesting against v0.8.3, not assumed still valid.
+- **Every other supplier project's `config.yaml` needs a new
+  `tables.suppliers: ODC_suppliers` key before upgrading past v0.8.0** -
+  breaking for every caller of `jobstodo.get_job_details()`, not only
+  human-wait/RDP suppliers (see the Known Gotchas entry). At least
+  `automation-odc-wave`, `automation-odc-british-gas`,
+  `automation-odc-crown-gas-and-power-ltd`,
   `automation-odc-totalenergies-gas-power-ltd`,
-  `automation-odc-castle-water-ltd`, `automation-odc-source-for-business`,
-  and `automation-odc-energia` all call it today.
+  `automation-odc-castle-water-ltd`, and `automation-odc-source-for-business`
+  still need this (`automation-odc-energia` already has it - see above).
 - Retroactively confirm the plaintext storage of
   `rdp_host`/`rdp_username`/`rdp_password` on `ODC_jobs` (already applied to
   both `Titan_INSE_DEV` and `Titan_INSE` - see Databases above) is
@@ -365,33 +408,23 @@ entry point of its own.
   higher-privilege credential (RDP access to a machine) than the portal
   logins already stored in `ODC_credentials`, even though it follows the
   same plaintext pattern.
-- Cut a `v0.8.2` release with the built wheel attached, following
-  `RELEASING.md` - supersedes `v0.8.1`, which has the premature-takeover bug
-  described in the Change Log above. `v0.8.1` cannot be edited or deleted
-  per the Hard Rules, so anyone who already pulled it needs to move to
-  `v0.8.2` directly rather than expecting a fix in place.
-- Migrate `automation-odc-energia` Phase 3 to v0.8.2, ideally by adopting
-  the new `human_in_loop.wait_for_human_login()` wholesale instead of
-  keeping its own local banner/button/poll-loop implementation (which this
-  version generalised out of that exact code) - no compatibility shim
-  exists since 0.8.0 was never released. This is also the fix for both
-  outstanding bugs above: the button-only trigger and the correct
-  `set_human_wait()` signature both come for free by switching to it.
-  - Its own `_show_banner()`/`_inject_login_confirm_button()`/
-    `_login_confirmed_by_button()`/`_clear_login_confirm_button()`/
-    `wait_for_human_login()` in `energia_supplier.py` become redundant;
-    `main.py` would call `human_in_loop.wait_for_human_login()` directly,
-    passing `_post_login_reached()` as `is_logged_in`.
-  - Either way, `main.py`'s existing `set_human_wait()` call site needs the
-    new signature (`rdp_host`/`rdp_username`/`rdp_password` inserted between
-    `timeout_s` and `tables`), and needs `tables["suppliers"]` per the
-    bullet above.
-  - `docs/energia-human-assisted-login-control-room-contract.md` documents
-    the old two-state (`WAITING_FOR_HUMAN`/`NULL`) design and the old
-    `set_human_wait(job_id, timeout_s, tables, dsn)` signature throughout -
-    needs a rewrite for the new `PENDING_HUMAN`/`COMPLETE`/`NULL` lifecycle,
-    the `rdp_*` columns, and the RDP-based join mechanism (the contract as
-    written still describes noVNC as the transport, not RDP).
+- Cut a `v0.8.3` release with the built wheel attached, following
+  `RELEASING.md` - supersedes both `v0.8.1` (premature-takeover bug) and
+  `v0.8.2` (window-global confirm-button bug under patchright's isolated
+  worlds), neither of which can be edited or deleted per the Hard Rules, so
+  anyone who already pulled either needs to move to `v0.8.3` directly.
+- Re-verify job 145 (or a fresh test run) against v0.8.3 end-to-end, now
+  that `automation-odc-energia` is fully migrated: confirm
+  `human_wait_status` actually reaches `PENDING_HUMAN` when the wait
+  starts, and that a genuine button click now ends the wait (the DOM-attribute
+  fix) instead of hanging until timeout.
+- `automation-odc-energia`'s own
+  `docs/energia-human-assisted-login-control-room-contract.md` still
+  documents the pre-migration design throughout - the old two-state
+  (`WAITING_FOR_HUMAN`/`NULL`) lifecycle, the old
+  `set_human_wait(job_id, timeout_s, tables, dsn)` signature, and noVNC as
+  the transport instead of RDP - needs a rewrite to match what's actually
+  running now.
 - Cut a `v0.7.0` release with the built wheel attached, following
   `RELEASING.md`. Any supplier project whose jobs can carry
   `client_name == "inspired plc"` rows (at least `automation-odc-wave` and

@@ -78,10 +78,24 @@ _BANNER_JS = """
 # challenge widget), so there is exactly one, on the top document only.
 #
 # Deliberately does NOT use page.expose_function()/a Python callback - a
-# plain JS flag on window, read back via page.evaluate() each poll tick, has
-# no async round-trip to desync from the page's own navigation. See
+# plain flag read back via page.evaluate() each poll tick has no async
+# round-trip to desync from the page's own navigation. See
 # automation-odc-energia's CLAUDE.md Change Log for the live-run failure
 # mode (a stuck "Confirming..." button) that ruled out expose_function().
+#
+# The flag itself is a DOM attribute (btn.dataset.confirmed), not a
+# window.* global - found necessary in 0.8.3 after live testing against
+# automation-odc-energia (which drives the browser via patchright, a
+# stealth-patched Playwright fork used specifically to avoid tripping this
+# portal's reCAPTCHA bot detection). Stealth patches like this commonly
+# route injected scripts through an isolated JS world specifically to hide
+# automation fingerprints from page-level detection scripts: the DOM is
+# shared across worlds (so the button rendered and its click handler ran,
+# updating its own textContent - visible on screen), but window.* globals
+# are NOT shared across worlds, so a flag set there by the click handler
+# was invisible to page.evaluate() reading it back, and the wait never
+# ended even after a genuine click. DOM state has no such isolation - it is
+# the one thing guaranteed consistent regardless of which world touches it.
 _LOGIN_CONFIRM_BUTTON_JS = """
 (() => {
     if (window.top !== window.self) { return; }
@@ -91,12 +105,12 @@ _LOGIN_CONFIRM_BUTTON_JS = """
     // check the button would keep reappearing on every page for the rest
     // of the run, well past the point it stopped meaning anything.
     if (sessionStorage.getItem('odcHumanLoopTakenOver')) { return; }
-    window.__odcHumanLoopConfirmed = false;
     function addButton() {
         if (document.getElementById('odc-human-loop-confirm-btn')) { return; }
         if (!document.body) { requestAnimationFrame(addButton); return; }
         const btn = document.createElement('button');
         btn.id = 'odc-human-loop-confirm-btn';
+        btn.dataset.confirmed = 'false';
         btn.textContent = "I'm logged in - continue automation";
         btn.style.cssText = [
             'position:fixed', 'bottom:20px', 'right:20px', 'z-index:2147483647',
@@ -107,7 +121,7 @@ _LOGIN_CONFIRM_BUTTON_JS = """
         btn.addEventListener('click', () => {
             btn.disabled = true;
             btn.textContent = 'Confirmed - automation taking over...';
-            window.__odcHumanLoopConfirmed = true;
+            btn.dataset.confirmed = 'true';
         });
         document.body.appendChild(btn);
     }
@@ -154,9 +168,21 @@ def _inject_login_confirm_button(page: Any) -> None:
 
 
 def _login_confirmed_by_button(page: Any) -> bool:
-    """Read the confirm button's flag live - see _LOGIN_CONFIRM_BUTTON_JS."""
+    """Read the confirm button's flag live - see _LOGIN_CONFIRM_BUTTON_JS.
+
+    Reads a DOM attribute (element.dataset.confirmed), not a window.*
+    global - the DOM is the one thing guaranteed shared across isolated JS
+    worlds, which some stealth browser-automation patches (e.g. patchright)
+    use to hide injected-script fingerprints from the page. A window.*
+    global set by the click handler is not reliably visible to a separate
+    page.evaluate() call under those patches; see this module's comment
+    above _LOGIN_CONFIRM_BUTTON_JS for the live failure this was found from.
+    """
     try:
-        return bool(page.evaluate("() => window.__odcHumanLoopConfirmed === true"))
+        return bool(page.evaluate(
+            "() => document.getElementById('odc-human-loop-confirm-btn')"
+            "?.dataset.confirmed === 'true'",
+        ))
     except Exception:
         logger.debug(
             "HUMAN_IN_LOOP - could not read login-confirm button state", exc_info=True,

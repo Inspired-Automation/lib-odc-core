@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "odc-core"
-version = "0.8.2"
+version = "0.8.3"
 description = "Shared ODC (Online Data Collection) infrastructure used by every supplier project: job claiming, file allocation, file save, job-status update, and Microsoft Graph mail/OTP helpers."
 readme = "README.md"
 requires-python = ">=3.14"
