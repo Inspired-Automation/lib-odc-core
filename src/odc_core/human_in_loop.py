@@ -186,8 +186,18 @@ def _poll_until_logged_in(
     is_logged_in: Callable[[Any], bool],
     timeout_s: int,
 ) -> bool:
-    """Show the started banner, inject the confirm button, then poll both
-    the button and is_logged_in() until one succeeds or timeout_s elapses.
+    """Show the started banner, inject the confirm button, then poll until
+    the button is clicked or timeout_s elapses.
+
+    The button click is the sole trigger for success - is_logged_in(page)
+    is called every tick too, but only for diagnostic logging (see the
+    heartbeat below), never to end the wait on its own. A URL/DOM-based
+    "did the login succeed" check cannot reliably distinguish a genuine
+    finished login from an intermediate page in the middle of one (a
+    redirect during a reCAPTCHA challenge, for instance), so treating it as
+    an equal, independent trigger risks the bot taking over control while
+    the human is still mid-task. The explicit button click has no such
+    ambiguity.
     """
     _inject_login_confirm_button(page)
     _show_banner(
@@ -201,13 +211,15 @@ def _poll_until_logged_in(
     deadline = time.monotonic() + timeout_s
     while time.monotonic() < deadline:
         button_confirmed = _login_confirmed_by_button(page)
-        if button_confirmed or is_logged_in(page):
+        logged_in = is_logged_in(page)
+        if button_confirmed:
             return True
         now = time.monotonic()
         if now - last_heartbeat >= HEARTBEAT_INTERVAL_S:
             logger.info(
-                "HUMAN_IN_LOOP - still waiting for human login (confirm_button_clicked=%s)",
-                button_confirmed,
+                "HUMAN_IN_LOOP - still waiting for human login (confirm_button_clicked=%s, "
+                "is_logged_in=%s - diagnostic only, does not end the wait)",
+                button_confirmed, logged_in,
             )
             last_heartbeat = now
         time.sleep(POLL_INTERVAL_S)
@@ -240,8 +252,9 @@ def wait_for_human_login(
          open the RDP session.
       2. Injects the "I'm logged in - continue automation" button and the
          on-page banner, then polls every POLL_INTERVAL_S (up to timeout_s)
-         for either the button being clicked or `is_logged_in(page)`
-         returning True - whichever comes first.
+         until the button is clicked - the sole trigger for success. See
+         _poll_until_logged_in()'s docstring for why `is_logged_in(page)` is
+         diagnostic-only here rather than an equal, independent trigger.
       3. On success: shows a "taking over" banner, clears the confirm
          button, calls jobstodo.set_human_wait_complete() (nulls the RDP
          columns - the cue for the toolkit to disconnect), then sleeps
@@ -259,9 +272,13 @@ def wait_for_human_login(
 
     `is_logged_in(page) -> bool` is the caller's own, portal-specific check
     (e.g. a post-login URL/DOM marker) - this function has no way to know
-    what a successful login looks like on any given portal. It is called
-    every poll tick and must be defensive: an exception it raises propagates
-    out of this function (past the button/banner logic, though
+    what a successful login looks like on any given portal. It does **not**
+    end the wait on its own (only the confirm button does - see
+    _poll_until_logged_in()); it is called every poll tick and logged at
+    each heartbeat purely as a diagnostic, so a supplier team can validate a
+    candidate marker's timing against the button click before ever trusting
+    it further. It must still be defensive: an exception it raises
+    propagates out of this function (past the button/banner logic, though
     clear_human_wait() in the finally still runs) and ends the wait early.
     See automation-odc-energia's `_post_login_reached()` for a reference
     implementation.

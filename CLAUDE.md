@@ -112,14 +112,18 @@ entry point of its own.
   other error surface on the first attempt. Replaying is safe for the units in
   this package because a transient SQLSTATE means nothing was committed; check
   that before wrapping a partially-committed multi-statement unit.
-- Human-assisted login (0.8.1): a supplier checks `human_in_loop` on any row
-  `jobstodo.get_job_details()` returns (left-joined from `ODC_suppliers`,
-  §4.3) and, if truthy, calls `human_in_loop.wait_for_human_login()` instead
-  of driving its own login. That one call owns the entire lifecycle - the
-  on-page banner and confirm button, the poll loop, and the
+- Human-assisted login (0.8.1, poll-trigger fix in 0.8.2): a supplier checks
+  `human_in_loop` on any row `jobstodo.get_job_details()` returns
+  (left-joined from `ODC_suppliers`, §4.3) and, if truthy, calls
+  `human_in_loop.wait_for_human_login()` instead of driving its own login.
+  That one call owns the entire lifecycle - the on-page banner and confirm
+  button, the poll loop, and the
   `jobstodo.set_human_wait()`/`set_human_wait_complete()`/`clear_human_wait()`
   sequencing - so a supplier project only has to supply `is_logged_in(page)`,
-  its own portal-specific "did the login succeed" check. Generalised out of
+  its own portal-specific "did the login succeed" check. **`is_logged_in()`
+  does not end the wait on its own** (fixed in 0.8.2 - see Change Log): only
+  the injected confirm button does; `is_logged_in()` is logged at each
+  heartbeat purely as a diagnostic. Generalised out of
   `automation-odc-energia`'s Phase 3, the only current `human_in_loop=1`
   supplier.
 
@@ -187,12 +191,34 @@ entry point of its own.
   detection is the one thing `human_in_loop.wait_for_human_login()` still
   cannot generalise: the caller supplies `is_logged_in(page)`, a
   portal-specific check (e.g. `automation-odc-energia`'s
-  `_post_login_reached()`, a post-login URL marker). A caller passing an
-  `is_logged_in` that returns `True` too early would cause a poller to
-  disconnect an RDP session mid-login - neither `jobstodo` nor
-  `human_in_loop` can guard against that misuse.
+  `_post_login_reached()`, a post-login URL marker) - but per 0.8.2, this
+  callable is diagnostic-only (logged at each heartbeat) and cannot end the
+  wait on its own; only the injected confirm button can. 0.8.1 originally
+  let either one trigger success, and live testing against
+  `automation-odc-energia` immediately hit the exact failure mode this
+  entry used to warn about: the "taking over" banner fired before the human
+  had clicked anything, because a URL-based marker read true on an
+  intermediate page mid-login. `is_logged_in` no longer needs to be
+  airtight against false positives for this reason, but it must still be
+  defensive against exceptions - one propagates out of
+  `wait_for_human_login()` and ends the wait early (see that function's
+  docstring).
 
 ## Change Log
+- 2026-09-09: v0.8.2 - fixed `human_in_loop.wait_for_human_login()`'s poll
+  loop treating `is_logged_in(page)` as an equal, independent trigger
+  alongside the confirm button. v0.8.1 shipped with `if button_confirmed or
+  is_logged_in(page): return True`; live testing against
+  `automation-odc-energia` (job 145 on `Titan_INSE_DEV`) hit this within
+  minutes of the release going out - the "Automation taking over" banner
+  fired, and the bot began resuming control, before the human had clicked
+  anything, because a URL-based post-login marker read `True` on an
+  intermediate page mid-login. Only the button click ends the wait now;
+  `is_logged_in()` is still called every tick and included in the heartbeat
+  log, but purely as a diagnostic. `v0.8.1` was already tagged, pushed, and
+  published as a GitHub Release with its wheel attached before this was
+  found - per the Hard Rules in `RELEASING.md` ("never edit, move, or
+  force-push a tag"), this is a new release, not an amendment to 0.8.1.
 - 2026-09-09: v0.8.1 (cont.) - generalised `automation-odc-energia`'s Phase 3
   human-assisted-login mechanism into two new pieces, so any supplier can use
   it instead of only Energia:
@@ -314,8 +340,18 @@ entry point of its own.
   does not exist and made the documented `pip install` URLs 404).
 
 ## Outstanding TODOs
+- Confirm the root cause behind `human_wait_status` reading `NULL` for job
+  145 (`Titan_INSE_DEV`, client `BoxFIsh`, supplier `Energia`) during live
+  testing of v0.8.1 - `process_id` was set (987654) but every
+  `human_wait_*`/`rdp_*` column was `NULL`. Inferred, not yet confirmed
+  against `automation-odc-energia`'s actual run logs: `main.py` still calls
+  the pre-0.8.1 4-arg `jobstodo.set_human_wait(job_id, timeout_s, tables,
+  dsn)`, which raises `TypeError` against the installed 0.8.1 (7-arg)
+  signature - caught, logged, and swallowed by `main.py`'s existing broad
+  `except Exception`, so the signal silently never gets written. If
+  confirmed, resolved the same way as the migration item below.
 - **Every supplier project's `config.yaml` needs a new `tables.suppliers:
-  ODC_suppliers` key before upgrading to v0.8.1** - breaking for every
+  ODC_suppliers` key before upgrading to v0.8.2** - breaking for every
   caller of `jobstodo.get_job_details()`, not only human-wait/RDP suppliers
   (see the new Known Gotchas entry). At least `automation-odc-wave`,
   `automation-odc-british-gas`, `automation-odc-crown-gas-and-power-ltd`,
@@ -329,11 +365,18 @@ entry point of its own.
   higher-privilege credential (RDP access to a machine) than the portal
   logins already stored in `ODC_credentials`, even though it follows the
   same plaintext pattern.
-- Migrate `automation-odc-energia` Phase 3 to v0.8.1, ideally by adopting
+- Cut a `v0.8.2` release with the built wheel attached, following
+  `RELEASING.md` - supersedes `v0.8.1`, which has the premature-takeover bug
+  described in the Change Log above. `v0.8.1` cannot be edited or deleted
+  per the Hard Rules, so anyone who already pulled it needs to move to
+  `v0.8.2` directly rather than expecting a fix in place.
+- Migrate `automation-odc-energia` Phase 3 to v0.8.2, ideally by adopting
   the new `human_in_loop.wait_for_human_login()` wholesale instead of
   keeping its own local banner/button/poll-loop implementation (which this
   version generalised out of that exact code) - no compatibility shim
-  exists since 0.8.0 was never released:
+  exists since 0.8.0 was never released. This is also the fix for both
+  outstanding bugs above: the button-only trigger and the correct
+  `set_human_wait()` signature both come for free by switching to it.
   - Its own `_show_banner()`/`_inject_login_confirm_button()`/
     `_login_confirmed_by_button()`/`_clear_login_confirm_button()`/
     `wait_for_human_login()` in `energia_supplier.py` become redundant;
@@ -349,14 +392,6 @@ entry point of its own.
     needs a rewrite for the new `PENDING_HUMAN`/`COMPLETE`/`NULL` lifecycle,
     the `rdp_*` columns, and the RDP-based join mechanism (the contract as
     written still describes noVNC as the transport, not RDP).
-- Cut a `v0.8.1` release with the built wheel attached, following
-  `RELEASING.md` - the DDL is already confirmed applied to both databases
-  (see Databases above), so that former blocker is clear. No supplier bot
-  has taken a dependency on 0.8.0 yet (its wheel was never cut), so 0.8.1 is
-  the first real release since 0.7.0. `automation-odc-energia` needs it for
-  human-assisted login; every other current caller of
-  `jobstodo.get_job_details()` also needs it (for the `tables.suppliers`
-  config change above) before it can pull in any future release at all.
 - Cut a `v0.7.0` release with the built wheel attached, following
   `RELEASING.md`. Any supplier project whose jobs can carry
   `client_name == "inspired plc"` rows (at least `automation-odc-wave` and

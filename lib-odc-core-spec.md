@@ -245,9 +245,10 @@ cookie-banner dismissal (see `browser_helpers.dismiss_cookie_banner()`) are
 each supplier's own concern. `is_logged_in(page) -> bool` is the one
 genuinely supplier-specific piece this function cannot provide: a check for
 whatever marks a successful login on that particular portal (a URL change,
-a dashboard element, etc.). It is called every poll tick and must be
-defensive - an exception it raises propagates out of `wait_for_human_login()`
-itself (ending the wait early, though `clear_human_wait()` still runs).
+a dashboard element, etc.). **It does not end the wait on its own** (0.8.2 -
+see below); it is called every poll tick and must be defensive regardless -
+an exception it raises propagates out of `wait_for_human_login()` itself
+(ending the wait early, though `clear_human_wait()` still runs).
 
 What it does, end to end:
 
@@ -255,9 +256,16 @@ What it does, end to end:
 2. Injects a fixed "I'm logged in - continue automation" button (a plain JS
    flag read back via `page.evaluate()` each tick, not `page.expose_function()`
    - see the module's own comments for why) and an on-page banner, then
-   polls every 1.5s (`human_in_loop.POLL_INTERVAL_S`) for either the button
-   or `is_logged_in(page)` to return true, logging a heartbeat every 20s
-   (`HEARTBEAT_INTERVAL_S`) so a stalled wait is visible in the log.
+   polls every 1.5s (`human_in_loop.POLL_INTERVAL_S`) until the button is
+   clicked - the sole trigger for success (0.8.2 - see below), logging a
+   heartbeat every 20s (`HEARTBEAT_INTERVAL_S`) so a stalled wait is visible
+   in the log. `is_logged_in(page)` is called every tick too and included in
+   the heartbeat log, but purely as a diagnostic: a URL/DOM-based marker can
+   read true on an intermediate page mid-login (a reCAPTCHA redirect, for
+   instance), so treating it as an equal, independent trigger risked the bot
+   taking over while the human was still mid-task - found in live testing
+   against `automation-odc-energia`, fixed in 0.8.2. The explicit button
+   click has no such ambiguity.
 3. On success: shows a "taking over" banner, clears the confirm button,
    calls `jobstodo.set_human_wait_complete()`, then sleeps 5s
    (`TAKEOVER_PAUSE_S`) before returning `True` - this pause does double

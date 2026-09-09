@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.8.2] - 2026-09-09
+### Fixed
+- `human_in_loop.wait_for_human_login()`'s poll loop no longer treats
+  `is_logged_in(page)` as an equal, independent trigger alongside the
+  confirm button - only the button click ends the wait successfully now.
+  Found in live testing against `automation-odc-energia`: the "Automation
+  taking over" banner (and the bot resuming control) could fire before a
+  human had actually clicked "I'm logged in", because a URL/DOM-based
+  marker can read as "logged in" on an intermediate page mid-login (e.g.
+  during a reCAPTCHA redirect) - exactly the ambiguity the original
+  `automation-odc-energia` code's own docstring flagged as "not fully
+  confirmed against the live portal" when this was ported into 0.8.1's new
+  `human_in_loop` module. `is_logged_in(page)` is still called every poll
+  tick and logged at each heartbeat, now purely as a diagnostic - not as a
+  second way to end the wait.
+
 ## [0.8.1] - 2026-09-09
 ### Changed
 - `jobstodo.set_human_wait()` gains three new **required** parameters -

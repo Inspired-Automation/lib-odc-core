@@ -21,9 +21,11 @@ def _page_mock(*, button_confirmed: bool = False) -> MagicMock:
 @patch("odc_core.jobstodo.set_human_wait_complete")
 @patch("odc_core.jobstodo.set_human_wait")
 @patch("odc_core.human_in_loop.time.sleep")
-def test_success_via_is_logged_in(mock_sleep, mock_set, mock_complete, mock_clear):
-    page = _page_mock()
-    is_logged_in = MagicMock(return_value=True)
+def test_success_via_button_click_calls_complete_then_clear_in_order(
+    mock_sleep, mock_set, mock_complete, mock_clear,
+):
+    page = _page_mock(button_confirmed=True)
+    is_logged_in = MagicMock(return_value=False)
     call_order: list[str] = []
     mock_complete.side_effect = lambda *a, **k: call_order.append("complete")
     mock_clear.side_effect = lambda *a, **k: call_order.append("clear")
@@ -41,6 +43,29 @@ def test_success_via_is_logged_in(mock_sleep, mock_set, mock_complete, mock_clea
     # clear_human_wait must run after set_human_wait_complete (COMPLETE -> NULL, not skipped).
     assert call_order == ["complete", "clear"]
     mock_sleep.assert_called_once_with(human_in_loop.TAKEOVER_PAUSE_S)
+
+
+@patch("odc_core.human_in_loop.browser_helpers.take_error_screenshot")
+@patch("odc_core.jobstodo.clear_human_wait")
+@patch("odc_core.jobstodo.set_human_wait_complete")
+@patch("odc_core.jobstodo.set_human_wait")
+@patch("odc_core.human_in_loop.time.sleep")
+def test_is_logged_in_alone_does_not_trigger_success(
+    mock_sleep, mock_set, mock_complete, mock_clear, mock_screenshot,
+):
+    # is_logged_in() is diagnostic-only: a URL/DOM marker can be true on an
+    # intermediate page mid-login, so only the explicit button click may
+    # end the wait successfully - see human_in_loop._poll_until_logged_in().
+    page = _page_mock(button_confirmed=False)
+    is_logged_in = MagicMock(return_value=True)
+
+    result = human_in_loop.wait_for_human_login(
+        page, is_logged_in, "JOB1", 0, "RDS01", "rdpuser", "rdppass", TABLES, "Jupiter", {},
+    )
+
+    assert result is False
+    mock_complete.assert_not_called()
+    mock_clear.assert_called_once_with("JOB1", TABLES, "Jupiter")
 
 
 @patch("odc_core.jobstodo.clear_human_wait")
@@ -88,8 +113,8 @@ def test_timeout_returns_false_and_never_completes(
 def test_set_human_wait_failure_is_swallowed_and_wait_still_runs(
     mock_sleep, mock_set, mock_complete, mock_clear,
 ):
-    page = _page_mock()
-    is_logged_in = MagicMock(return_value=True)
+    page = _page_mock(button_confirmed=True)
+    is_logged_in = MagicMock(return_value=False)
 
     result = human_in_loop.wait_for_human_login(
         page, is_logged_in, "JOB1", 600, "RDS01", "rdpuser", "rdppass", TABLES, "Jupiter", {},
@@ -105,8 +130,8 @@ def test_set_human_wait_failure_is_swallowed_and_wait_still_runs(
 @patch("odc_core.jobstodo.set_human_wait")
 @patch("odc_core.human_in_loop.time.sleep")
 def test_clear_human_wait_failure_is_swallowed(mock_sleep, mock_set, mock_complete, mock_clear):
-    page = _page_mock()
-    is_logged_in = MagicMock(return_value=True)
+    page = _page_mock(button_confirmed=True)
+    is_logged_in = MagicMock(return_value=False)
 
     result = human_in_loop.wait_for_human_login(
         page, is_logged_in, "JOB1", 600, "RDS01", "rdpuser", "rdppass", TABLES, "Jupiter", {},
