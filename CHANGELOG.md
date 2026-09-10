@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.8.7] - 2026-09-10
+### Added
+- `human_in_loop.get_current_hostname()` - a thin `socket.gethostname()`
+  wrapper for building the `rdp_host` argument to `wait_for_human_login()`,
+  completing the set of three `rdp_*` helpers alongside
+  `get_current_windows_username()` (0.8.4) and `get_rdp_password()` (0.8.6).
+  Not a new capability - `automation-odc-energia`'s `main.py` had been
+  calling `socket.gethostname()` inline for this since before the module
+  existed - but it was never centralised here when the other two were
+  added, despite that repo's own code comment arguing for exactly that
+  ("every human_in_loop=1 supplier sources it the same documented way").
+
 ## [0.8.6] - 2026-09-10
 ### Changed
 - `human_in_loop.get_current_windows_username()` now returns the account

@@ -19,6 +19,7 @@ import getpass
 import json
 import logging
 import os
+import socket
 import time
 from collections.abc import Callable
 from pathlib import Path
@@ -33,6 +34,30 @@ logger = logging.getLogger(__name__)
 #: scoped to one specific machine rather than the whole team (team.yaml).
 #: Not committed anywhere; written by whatever provisions the run node.
 _RDP_CREDENTIALS_FILENAME = "rdp-credentials.json"
+
+
+def get_current_hostname() -> str:
+    """Return this run node's own hostname, for the `rdp_host` argument.
+
+    Convenience for building the `rdp_host` argument to
+    `wait_for_human_login()`/`jobstodo.set_human_wait()`: the toolkit's RDP
+    session needs to reach whichever machine is actually running this
+    process, wherever it was deployed - a config value would just be one
+    more thing to keep in sync with reality, and would drift the moment
+    RDS machines are assigned dynamically per run rather than fixed (see
+    `rdp_host`'s own note in lib-odc-core-spec.md §4.2). Thin wrapper
+    around `socket.gethostname()`.
+
+    Added in 0.8.7 for the same reason `get_current_windows_username()`
+    (0.8.4) exists rather than every supplier inlining its own call:
+    `automation-odc-energia`'s `main.py` had been calling
+    `socket.gethostname()` directly since before this module existed, and
+    was never centralised here alongside the other two `rdp_*` helpers when
+    those were added - even though its own comment there makes exactly the
+    argument for doing so ("every human_in_loop=1 supplier sources it the
+    same documented way").
+    """
+    return socket.gethostname()
 
 
 def get_current_windows_username() -> str:

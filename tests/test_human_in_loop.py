@@ -20,6 +20,12 @@ def _page_mock(*, button_confirmed: bool = False) -> MagicMock:
     return page
 
 
+@patch("odc_core.human_in_loop.socket.gethostname", return_value="MAN-RDS-V12")
+def test_get_current_hostname_wraps_socket(mock_gethostname):
+    assert human_in_loop.get_current_hostname() == "MAN-RDS-V12"
+    mock_gethostname.assert_called_once_with()
+
+
 @patch("odc_core.human_in_loop.getpass.getuser", return_value="svc.UATbotrunner01")
 def test_get_current_windows_username_prefixes_domain(mock_getuser, monkeypatch):
     monkeypatch.setenv("USERDOMAIN", "INSPIREDENERGYS")

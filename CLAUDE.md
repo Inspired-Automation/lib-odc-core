@@ -234,6 +234,17 @@ entry point of its own.
   the same reason - never add another `window.*` global here.
 
 ## Change Log
+- 2026-09-10: v0.8.7 - added `human_in_loop.get_current_hostname()`, a thin
+  `socket.gethostname()` wrapper for the `rdp_host` argument, completing
+  the set of three `rdp_*` helpers alongside `get_current_windows_username()`
+  (0.8.4) and `get_rdp_password()` (0.8.6). Not a new capability -
+  `automation-odc-energia`'s `main.py` had been calling
+  `socket.gethostname()` inline for this since before the module existed -
+  but it was an inconsistency worth fixing: that same file's own code
+  comment already argues for centralising exactly this kind of call
+  ("every human_in_loop=1 supplier sources it the same documented way"),
+  yet `rdp_host` was the one of the three left inlined when the other two
+  were added.
 - 2026-09-10: v0.8.6 - `human_in_loop.get_current_windows_username()` now
   returns the account domain-qualified (`DOMAIN\username`), not just the
   bare username - confirmed directly against a live RDP connection panel

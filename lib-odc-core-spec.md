@@ -241,6 +241,7 @@ wait_for_human_login(
     started_message: str = DEFAULT_STARTED_MESSAGE,
 ) -> bool
 
+get_current_hostname() -> str
 get_current_windows_username() -> str
 get_rdp_password() -> str
 ```
@@ -255,6 +256,16 @@ in'" - passes its own text rather than this library guessing at
 portal-specific wording. Only the *started* banner is overridable this way;
 the "taking over" and "no response" banners stay fixed, generic text, since
 neither references anything portal-specific.
+
+`get_current_hostname()` (0.8.7) builds the `rdp_host` argument above from
+this run node's own `socket.gethostname()`, for the same reason as
+`get_current_windows_username()` below: the toolkit's RDP session needs to
+reach whichever machine is actually running this process, wherever it was
+deployed, so a config value would just be one more thing to keep in sync
+and would drift once RDS machines are assigned dynamically per run.
+`automation-odc-energia`'s `main.py` had been calling `socket.gethostname()`
+inline since before this existed - centralised here for consistency with
+the other two `rdp_*` helpers, not because the inline call was wrong.
 
 `get_current_windows_username()` (0.8.4) builds the `rdp_username` argument
 above from the Windows account the bot's own process is actually signed in
