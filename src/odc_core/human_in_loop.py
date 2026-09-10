@@ -16,18 +16,27 @@ lib-odc-core-spec.md §4.2/§4.3.
 from __future__ import annotations
 
 import getpass
+import json
 import logging
+import os
 import time
 from collections.abc import Callable
+from pathlib import Path
 from typing import Any
 
 from . import browser_helpers, jobstodo
 
 logger = logging.getLogger(__name__)
 
+#: Per-machine RDP credential file, mirroring automation-odc-energia's
+#: .claude/cr.py:settings() - the org's only other precedent for a secret
+#: scoped to one specific machine rather than the whole team (team.yaml).
+#: Not committed anywhere; written by whatever provisions the run node.
+_RDP_CREDENTIALS_FILENAME = "rdp-credentials.json"
+
 
 def get_current_windows_username() -> str:
-    """Return the Windows username the current process is signed in as.
+    """Return the current process's signed-in Windows account, as DOMAIN\\username.
 
     Convenience for building the `rdp_username` argument to
     `wait_for_human_login()`/`jobstodo.set_human_wait()`: the RDS machine's
@@ -37,12 +46,75 @@ def get_current_windows_username() -> str:
     different session. A per-supplier config value can drift from the
     actual machine's account, especially once RDS machines are assigned
     dynamically per run rather than fixed - this reads it directly from the
-    OS instead. Thin wrapper around `getpass.getuser()`, which raises
-    `OSError` if no username can be determined - not expected in this
-    setup, since the wait already requires an interactive desktop session
-    (see `automation-odc-energia`'s own `main.py` comment on that).
+    OS instead.
+
+    Domain-qualified, not just the bare username: an RDP client's own
+    connection form has separate Hostname/Username/Password fields, and the
+    Username one expects `DOMAIN\\name` (confirmed against a live RDP
+    connection panel showing `INSPIREDENERGYS\\svc.UATbotrunner01`) - a bare
+    username risks resolving to the wrong account (a same-named local
+    account shadowing the intended domain one, for instance) or the RDP
+    client rejecting it outright. `getpass.getuser()` alone only returns the
+    bare name (Windows populates it from the `USERNAME` environment
+    variable, which itself carries no domain); this prepends `USERDOMAIN`,
+    the other environment variable Windows sets alongside it for exactly
+    this purpose - covers both AD-domain and local (non-domain) accounts,
+    since Windows sets `USERDOMAIN` to the local computer name for the
+    latter. Falls back to the bare username if `USERDOMAIN` is unset (not
+    expected in this setup, since the wait already requires an interactive
+    desktop session - see `automation-odc-energia`'s own `main.py` comment
+    on that). `getpass.getuser()` raises `OSError` if no username can be
+    determined at all.
     """
-    return getpass.getuser()
+    username = getpass.getuser()
+    domain = os.environ.get("USERDOMAIN", "").strip()
+    if domain:
+        return f"{domain}\\{username}"
+    return username
+
+
+def get_rdp_password() -> str:
+    """Return this run node's RDP password for its own signed-in account.
+
+    Windows does not let a process read back its own logon password - see
+    `get_current_windows_username()`'s docstring for the username half of
+    this same limitation - so, unlike that one, this cannot be derived from
+    the OS at all. It has to come from wherever the account was actually
+    provisioned: reads, in order of precedence, the `ODC_RDP_PASSWORD`
+    environment variable, or a JSON object with an `rdp_password` key at
+    `%APPDATA%\\Inspired\\rdp-credentials.json`.
+
+    Mirrors `automation-odc-energia`'s `.claude/cr.py:settings()` - the
+    org's only other precedent (as of 0.8.6) for a secret scoped to one
+    specific machine rather than the whole team (`team.yaml`, loaded via
+    `automation_core.config.TEAM_YAML_PATH`, is the wrong shape here: every
+    RDS machine has a different account and password, not one shared
+    across the team). Whatever provisions this run node - creates the
+    local Windows account, sets its password - needs to write that same
+    value to one of these two places at that time; this function only
+    reads it back, it cannot create or discover it on its own.
+
+    Raises `ValueError` if neither source has a value - there is no
+    sensible default for a password.
+    """
+    password = os.environ.get("ODC_RDP_PASSWORD", "").strip()
+    if password:
+        return password
+
+    appdata = os.environ.get("APPDATA", "")
+    cfg_path = Path(appdata) / "Inspired" / _RDP_CREDENTIALS_FILENAME
+    if cfg_path.is_file():
+        cfg = json.loads(cfg_path.read_text(encoding="utf-8"))
+        password = str(cfg.get("rdp_password", "")).strip()
+        if password:
+            return password
+
+    raise ValueError(
+        "No RDP password found. Set the ODC_RDP_PASSWORD environment "
+        "variable, or create %APPDATA%\\Inspired\\rdp-credentials.json "
+        "holding a JSON object with an rdp_password key.",
+    )
+
 
 #: Seconds between poll ticks while waiting for the human.
 POLL_INTERVAL_S = 1.5

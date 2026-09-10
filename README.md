@@ -60,11 +60,16 @@ for detail in job_details:
   reCAPTCHA challenge". On success, `human_wait_status` is left at
   `COMPLETE` (a persistent terminal state, not auto-cleared). Generalised
   out of `automation-odc-energia`'s
-  Phase 3. Also exports `get_current_windows_username()`, a thin
-  `getpass.getuser()` wrapper for building the `rdp_username` argument from
-  the account the bot's own process is actually signed in as, rather than a
-  static config value that can drift once RDS machines are assigned
-  dynamically.
+  Phase 3. Also exports `get_current_windows_username()`, which builds the
+  `rdp_username` argument from the account the bot's own process is
+  actually signed in as (domain-qualified, `DOMAIN\username` - what an RDP
+  client's own username field expects), rather than a static config value
+  that can drift once RDS machines are assigned dynamically; and
+  `get_rdp_password()`, which reads the `ODC_RDP_PASSWORD` environment
+  variable or `%APPDATA%\Inspired\rdp-credentials.json` as a
+  fallback - unlike the username, a password can't be read back from the
+  OS at all, so it has to come from wherever the run node's account was
+  provisioned in the first place.
 - `file_allocation.py` - work out the target folder/filename for a downloaded
   invoice from `ODC_jobs`/`ODC_job_details` fields. For Inspired PLC, resolves
   the company folder name from SugarCRM via `sugar_client` and `sug_internal_id`

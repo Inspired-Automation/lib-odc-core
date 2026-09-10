@@ -192,6 +192,15 @@ entry point of its own.
   `finally` on a failure path, or simply never bothering on a success path)
   leaves a live RDP credential sitting in Titan until someone notices and
   clears it manually - there is no separate expiry/sweep job today.
+- `human_in_loop.get_rdp_password()` (0.8.6) only *reads* the run node's
+  RDP password (env var or `%APPDATA%\Inspired\rdp-credentials.json`) - it
+  has no way to create, verify, or discover one. This library has no
+  visibility into whatever actually provisions the run node/RDS machine
+  fleet, so it cannot confirm that provisioning process writes the
+  password to either location; if it doesn't, this raises `ValueError` at
+  the exact moment a job needs it. Unlike `get_current_windows_username()`
+  (which is genuinely derived from the OS and cannot drift), this is only
+  as reliable as whatever external process is expected to keep it in sync.
 - Detecting that a human has actually finished a human-assisted login is
   deliberately outside `jobstodo`'s scope - `set_human_wait_complete()` only
   records that it happened, it never detects it itself. As of 0.8.1 this
@@ -225,6 +234,33 @@ entry point of its own.
   the same reason - never add another `window.*` global here.
 
 ## Change Log
+- 2026-09-10: v0.8.6 - `human_in_loop.get_current_windows_username()` now
+  returns the account domain-qualified (`DOMAIN\username`), not just the
+  bare username - confirmed directly against a live RDP connection panel
+  screenshot expecting exactly that form
+  (`INSPIREDENERGYS\svc.UATbotrunner01`) and against this session's own
+  `$env:USERDOMAIN`/`$env:USERNAME`, which matched it. `getpass.getuser()`
+  alone only reads `USERNAME` (no domain); now prepends `USERDOMAIN`, the
+  Windows environment variable set alongside it for exactly this purpose
+  (covers local, non-domain accounts too, since Windows sets `USERDOMAIN`
+  to the local computer name for those). Falls back to the bare username
+  if `USERDOMAIN` is unset.
+  - Also added `human_in_loop.get_rdp_password()`. An agent
+  searched the whole org's codebase for an existing secrets pattern before
+  this was written - no vault of any kind (Key Vault, Secrets Manager,
+  HashiCorp Vault, Windows Credential Manager, keyring) exists anywhere.
+  The one precedent found for a secret scoped to a single machine (not the
+  whole team, which is what the shared `team.yaml` is for) is
+  `automation-odc-energia`'s `.claude/cr.py:settings()`, resolving the
+  Control Room API key via an env var first, then a per-machine
+  `%APPDATA%\Inspired\*.json` file. `get_rdp_password()` mirrors that
+  pattern exactly: `ODC_RDP_PASSWORD` env var, then
+  `%APPDATA%\Inspired\rdp-credentials.json`. Unlike
+  `get_current_windows_username()` (0.8.4), there is no OS-level fallback
+  possible here at all - Windows fundamentally does not expose a logged-in
+  session's password to a process - so this is entirely dependent on
+  whatever provisions the run node writing the password to one of these
+  two places; see the new Known Gotchas entry.
 - 2026-09-09: v0.8.5 - `jobstodo.set_human_wait_complete()` no longer nulls
   `rdp_host`/`rdp_username`/`rdp_password`; it now only writes
   `human_wait_status = 'COMPLETE'`, leaving those and `human_wait_deadline`

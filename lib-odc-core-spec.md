@@ -242,6 +242,7 @@ wait_for_human_login(
 ) -> bool
 
 get_current_windows_username() -> str
+get_rdp_password() -> str
 ```
 
 `started_message` (0.8.4, trailing/defaulted - existing positional call
@@ -255,15 +256,36 @@ portal-specific wording. Only the *started* banner is overridable this way;
 the "taking over" and "no response" banners stay fixed, generic text, since
 neither references anything portal-specific.
 
-`get_current_windows_username()` (0.8.4) is a thin `getpass.getuser()`
-wrapper - a convenience for building the `rdp_username` argument above from
-the Windows account the bot's own process is actually signed in as, rather
-than a static per-supplier config value. The human-assisted RDP session
-needs to connect as that same account to reach the desktop the bot is
-actually driving; a config value can drift once RDS machines are assigned
-dynamically per run (see `rdp_host`'s own note in §4.2). Raises `OSError`
-if no username can be determined - not expected here, since the wait
-already requires an interactive desktop session.
+`get_current_windows_username()` (0.8.4) builds the `rdp_username` argument
+above from the Windows account the bot's own process is actually signed in
+as, rather than a static per-supplier config value that can drift once RDS
+machines are assigned dynamically per run (see `rdp_host`'s own note in
+§4.2). Returns it domain-qualified, `DOMAIN\username` (0.8.6) - confirmed
+against a live RDP connection panel expecting exactly that form (e.g.
+`INSPIREDENERGYS\svc.UATbotrunner01`); a bare username risks resolving to
+the wrong account or the RDP client rejecting it outright.
+`getpass.getuser()` alone only returns the bare name (from the `USERNAME`
+environment variable, which carries no domain); this prepends
+`USERDOMAIN`, the environment variable Windows sets alongside it for
+exactly this purpose - covers both AD-domain and local (non-domain)
+accounts, since Windows sets `USERDOMAIN` to the local computer name for
+the latter. Falls back to the bare username if `USERDOMAIN` is unset.
+`getpass.getuser()` itself raises `OSError` if no username can be
+determined at all - not expected here, since the wait already requires an
+interactive desktop session.
+
+`get_rdp_password()` (0.8.6) is the password half of the same problem, but
+unlike the username it has no OS-derivable answer at all - Windows does
+not let a process read back its own logon password. Reads, in order of
+precedence, the `ODC_RDP_PASSWORD` environment variable, or a JSON object
+with an `rdp_password` key at `%APPDATA%\Inspired\rdp-credentials.json`.
+Mirrors `automation-odc-energia`'s `.claude/cr.py:settings()` - the org's
+only other precedent for a secret scoped to one specific machine rather
+than the whole team (`team.yaml` is the wrong shape: every RDS machine has
+a different account and password). Whatever provisions the run node -
+creates the local Windows account, sets its password - must write that
+same value to one of these two places; this function only reads it back.
+Raises `ValueError` if neither source has a value.
 
 Added 0.8.1, generalised out of `automation-odc-energia`'s Phase 3 (see
 `docs/energia-human-assisted-login-control-room-contract.md` in that repo,

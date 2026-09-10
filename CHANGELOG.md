@@ -7,6 +7,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.8.6] - 2026-09-10
+### Changed
+- `human_in_loop.get_current_windows_username()` now returns the account
+  domain-qualified, `DOMAIN\username`, instead of the bare username -
+  confirmed against a live RDP connection panel expecting exactly that
+  form (e.g. `INSPIREDENERGYS\svc.UATbotrunner01`). `getpass.getuser()`
+  alone only returns the bare name (from the `USERNAME` environment
+  variable, which carries no domain); this now prepends `USERDOMAIN`, the
+  environment variable Windows sets alongside it for exactly this purpose.
+  Falls back to the bare username if `USERDOMAIN` is unset.
+### Added
+- `human_in_loop.get_rdp_password()` - the password half of
+  `get_current_windows_username()`'s problem, but with no OS-derivable
+  answer: Windows does not let a process read back its own logon password.
+  Reads, in order of precedence, the `ODC_RDP_PASSWORD` environment
+  variable, or a JSON object with an `rdp_password` key at
+  `%APPDATA%\Inspired\rdp-credentials.json`. Mirrors
+  `automation-odc-energia`'s `.claude/cr.py:settings()` - the org's only
+  other precedent for a secret scoped to one specific machine rather than
+  the whole team (`team.yaml` is the wrong shape: every RDS machine has a
+  different account and password). Whatever provisions the run node -
+  creates the local Windows account, sets its password - must write that
+  same value to one of these two places; this function only reads it back
+  and cannot discover or create the password itself. Raises `ValueError`
+  if neither source has a value.
+
 ## [0.8.5] - 2026-09-09
 ### Changed
 - `jobstodo.set_human_wait_complete()` no longer nulls `rdp_host`/
