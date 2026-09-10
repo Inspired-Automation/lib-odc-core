@@ -1,7 +1,4 @@
-import json
 from unittest.mock import MagicMock, patch
-
-import pytest
 
 from odc_core import human_in_loop
 
@@ -26,47 +23,6 @@ def test_get_current_hostname_wraps_socket(mock_gethostname):
     mock_gethostname.assert_called_once_with()
 
 
-@patch("odc_core.human_in_loop.getpass.getuser", return_value="svc.UATbotrunner01")
-def test_get_current_windows_username_prefixes_domain(mock_getuser, monkeypatch):
-    monkeypatch.setenv("USERDOMAIN", "INSPIREDENERGYS")
-
-    assert human_in_loop.get_current_windows_username() == "INSPIREDENERGYS\\svc.UATbotrunner01"
-    mock_getuser.assert_called_once_with()
-
-
-@patch("odc_core.human_in_loop.getpass.getuser", return_value="svc_energia_run01")
-def test_get_current_windows_username_falls_back_to_bare_name(mock_getuser, monkeypatch):
-    monkeypatch.delenv("USERDOMAIN", raising=False)
-
-    assert human_in_loop.get_current_windows_username() == "svc_energia_run01"
-
-
-def test_get_rdp_password_from_env_var(monkeypatch):
-    monkeypatch.setenv("ODC_RDP_PASSWORD", "  s3cret  ")
-
-    assert human_in_loop.get_rdp_password() == "s3cret"
-
-
-def test_get_rdp_password_falls_back_to_appdata_file(tmp_path, monkeypatch):
-    monkeypatch.delenv("ODC_RDP_PASSWORD", raising=False)
-    inspired_dir = tmp_path / "Inspired"
-    inspired_dir.mkdir()
-    (inspired_dir / "rdp-credentials.json").write_text(
-        json.dumps({"rdp_password": "from-file"}), encoding="utf-8",
-    )
-    monkeypatch.setenv("APPDATA", str(tmp_path))
-
-    assert human_in_loop.get_rdp_password() == "from-file"
-
-
-def test_get_rdp_password_raises_when_nothing_found(tmp_path, monkeypatch):
-    monkeypatch.delenv("ODC_RDP_PASSWORD", raising=False)
-    monkeypatch.setenv("APPDATA", str(tmp_path))  # no rdp-credentials.json here
-
-    with pytest.raises(ValueError):
-        human_in_loop.get_rdp_password()
-
-
 def _banner_messages(page: MagicMock) -> list[str]:
     return [
         call.args[1]["message"]
@@ -84,7 +40,7 @@ def test_started_message_defaults_to_generic_wording(mock_sleep, mock_set, mock_
 
     human_in_loop.wait_for_human_login(
         page, MagicMock(return_value=False), "JOB1", 600,
-        "RDS01", "rdpuser", "rdppass", TABLES, "Jupiter", {},
+        "RDS01", TABLES, "Jupiter", {},
     )
 
     assert human_in_loop.DEFAULT_STARTED_MESSAGE in _banner_messages(page)
@@ -100,7 +56,7 @@ def test_started_message_override_reaches_banner(mock_sleep, mock_set, mock_comp
 
     human_in_loop.wait_for_human_login(
         page, MagicMock(return_value=False), "JOB1", 600,
-        "RDS01", "rdpuser", "rdppass", TABLES, "Jupiter", {},
+        "RDS01", TABLES, "Jupiter", {},
         started_message=custom,
     )
 
@@ -123,13 +79,11 @@ def test_success_via_button_click_completes_and_does_not_clear(
     is_logged_in = MagicMock(return_value=False)
 
     result = human_in_loop.wait_for_human_login(
-        page, is_logged_in, "JOB1", 600, "RDS01", "rdpuser", "rdppass", TABLES, "Jupiter", {},
+        page, is_logged_in, "JOB1", 600, "RDS01", TABLES, "Jupiter", {},
     )
 
     assert result is True
-    mock_set.assert_called_once_with(
-        "JOB1", 600, "RDS01", "rdpuser", "rdppass", TABLES, "Jupiter",
-    )
+    mock_set.assert_called_once_with("JOB1", 600, "RDS01", TABLES, "Jupiter")
     mock_complete.assert_called_once_with("JOB1", TABLES, "Jupiter")
     mock_clear.assert_not_called()
     mock_sleep.assert_called_once_with(human_in_loop.TAKEOVER_PAUSE_S)
@@ -150,7 +104,7 @@ def test_is_logged_in_alone_does_not_trigger_success(
     is_logged_in = MagicMock(return_value=True)
 
     result = human_in_loop.wait_for_human_login(
-        page, is_logged_in, "JOB1", 0, "RDS01", "rdpuser", "rdppass", TABLES, "Jupiter", {},
+        page, is_logged_in, "JOB1", 0, "RDS01", TABLES, "Jupiter", {},
     )
 
     assert result is False
@@ -170,7 +124,7 @@ def test_timeout_returns_false_and_never_completes(
     is_logged_in = MagicMock(return_value=False)
 
     result = human_in_loop.wait_for_human_login(
-        page, is_logged_in, "JOB1", 0, "RDS01", "rdpuser", "rdppass", TABLES, "Jupiter", {},
+        page, is_logged_in, "JOB1", 0, "RDS01", TABLES, "Jupiter", {},
     )
 
     assert result is False
@@ -190,7 +144,7 @@ def test_set_human_wait_failure_is_swallowed_and_wait_still_runs(
     is_logged_in = MagicMock(return_value=False)
 
     result = human_in_loop.wait_for_human_login(
-        page, is_logged_in, "JOB1", 600, "RDS01", "rdpuser", "rdppass", TABLES, "Jupiter", {},
+        page, is_logged_in, "JOB1", 600, "RDS01", TABLES, "Jupiter", {},
     )
 
     assert result is True
@@ -212,7 +166,7 @@ def test_clear_human_wait_failure_is_swallowed(
     is_logged_in = MagicMock(return_value=False)
 
     result = human_in_loop.wait_for_human_login(
-        page, is_logged_in, "JOB1", 0, "RDS01", "rdpuser", "rdppass", TABLES, "Jupiter", {},
+        page, is_logged_in, "JOB1", 0, "RDS01", TABLES, "Jupiter", {},
     )
 
     assert result is False
@@ -231,7 +185,7 @@ def test_is_logged_in_exception_still_clears_wait_and_propagates(
 
     try:
         human_in_loop.wait_for_human_login(
-            page, is_logged_in, "JOB1", 600, "RDS01", "rdpuser", "rdppass", TABLES, "Jupiter", {},
+            page, is_logged_in, "JOB1", 600, "RDS01", TABLES, "Jupiter", {},
         )
         raised = False
     except RuntimeError:

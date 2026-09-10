@@ -15,130 +15,37 @@ lib-odc-core-spec.md §4.2/§4.3.
 
 from __future__ import annotations
 
-import getpass
-import json
 import logging
-import os
 import socket
 import time
 from collections.abc import Callable
-from pathlib import Path
 from typing import Any
 
 from . import browser_helpers, jobstodo
 
 logger = logging.getLogger(__name__)
 
-#: Per-machine RDP credential file, mirroring automation-odc-energia's
-#: .claude/cr.py:settings() - the org's only other precedent for a secret
-#: scoped to one specific machine rather than the whole team (team.yaml).
-#: Not committed anywhere; written by whatever provisions the run node.
-_RDP_CREDENTIALS_FILENAME = "rdp-credentials.json"
-
 
 def get_current_hostname() -> str:
     """Return this run node's own hostname, for the `rdp_host` argument.
 
     Convenience for building the `rdp_host` argument to
-    `wait_for_human_login()`/`jobstodo.set_human_wait()`: the toolkit's RDP
+    `wait_for_human_login()`/`jobstodo.set_human_wait()`: the toolkit's VNC
     session needs to reach whichever machine is actually running this
     process, wherever it was deployed - a config value would just be one
     more thing to keep in sync with reality, and would drift the moment
-    RDS machines are assigned dynamically per run rather than fixed (see
+    machines are assigned dynamically per run rather than fixed (see
     `rdp_host`'s own note in lib-odc-core-spec.md §4.2). Thin wrapper
     around `socket.gethostname()`.
 
-    Added in 0.8.7 for the same reason `get_current_windows_username()`
-    (0.8.4) exists rather than every supplier inlining its own call:
-    `automation-odc-energia`'s `main.py` had been calling
-    `socket.gethostname()` directly since before this module existed, and
-    was never centralised here alongside the other two `rdp_*` helpers when
-    those were added - even though its own comment there makes exactly the
-    argument for doing so ("every human_in_loop=1 supplier sources it the
-    same documented way").
+    Added in 0.8.7, when this mechanism was briefly built around RDP rather
+    than VNC (see `jobstodo`'s module-level comment and the 0.8.8 Change Log
+    entry) - kept unchanged by the 0.8.8 revert back to VNC, since a
+    hostname is exactly what a VNC session needs too, and this function's
+    own job (read `socket.gethostname()` instead of trusting a static,
+    driftable config value) never depended on which transport it fed.
     """
     return socket.gethostname()
-
-
-def get_current_windows_username() -> str:
-    """Return the current process's signed-in Windows account, as DOMAIN\\username.
-
-    Convenience for building the `rdp_username` argument to
-    `wait_for_human_login()`/`jobstodo.set_human_wait()`: the RDS machine's
-    human-assisted RDP session needs to connect as the same Windows account
-    the bot's own browser session is already running under, so a poller's
-    toolkit reaches the actual desktop the bot is driving rather than a
-    different session. A per-supplier config value can drift from the
-    actual machine's account, especially once RDS machines are assigned
-    dynamically per run rather than fixed - this reads it directly from the
-    OS instead.
-
-    Domain-qualified, not just the bare username: an RDP client's own
-    connection form has separate Hostname/Username/Password fields, and the
-    Username one expects `DOMAIN\\name` (confirmed against a live RDP
-    connection panel showing `INSPIREDENERGYS\\svc.UATbotrunner01`) - a bare
-    username risks resolving to the wrong account (a same-named local
-    account shadowing the intended domain one, for instance) or the RDP
-    client rejecting it outright. `getpass.getuser()` alone only returns the
-    bare name (Windows populates it from the `USERNAME` environment
-    variable, which itself carries no domain); this prepends `USERDOMAIN`,
-    the other environment variable Windows sets alongside it for exactly
-    this purpose - covers both AD-domain and local (non-domain) accounts,
-    since Windows sets `USERDOMAIN` to the local computer name for the
-    latter. Falls back to the bare username if `USERDOMAIN` is unset (not
-    expected in this setup, since the wait already requires an interactive
-    desktop session - see `automation-odc-energia`'s own `main.py` comment
-    on that). `getpass.getuser()` raises `OSError` if no username can be
-    determined at all.
-    """
-    username = getpass.getuser()
-    domain = os.environ.get("USERDOMAIN", "").strip()
-    if domain:
-        return f"{domain}\\{username}"
-    return username
-
-
-def get_rdp_password() -> str:
-    """Return this run node's RDP password for its own signed-in account.
-
-    Windows does not let a process read back its own logon password - see
-    `get_current_windows_username()`'s docstring for the username half of
-    this same limitation - so, unlike that one, this cannot be derived from
-    the OS at all. It has to come from wherever the account was actually
-    provisioned: reads, in order of precedence, the `ODC_RDP_PASSWORD`
-    environment variable, or a JSON object with an `rdp_password` key at
-    `%APPDATA%\\Inspired\\rdp-credentials.json`.
-
-    Mirrors `automation-odc-energia`'s `.claude/cr.py:settings()` - the
-    org's only other precedent (as of 0.8.6) for a secret scoped to one
-    specific machine rather than the whole team (`team.yaml`, loaded via
-    `automation_core.config.TEAM_YAML_PATH`, is the wrong shape here: every
-    RDS machine has a different account and password, not one shared
-    across the team). Whatever provisions this run node - creates the
-    local Windows account, sets its password - needs to write that same
-    value to one of these two places at that time; this function only
-    reads it back, it cannot create or discover it on its own.
-
-    Raises `ValueError` if neither source has a value - there is no
-    sensible default for a password.
-    """
-    password = os.environ.get("ODC_RDP_PASSWORD", "").strip()
-    if password:
-        return password
-
-    appdata = os.environ.get("APPDATA", "")
-    cfg_path = Path(appdata) / "Inspired" / _RDP_CREDENTIALS_FILENAME
-    if cfg_path.is_file():
-        cfg = json.loads(cfg_path.read_text(encoding="utf-8"))
-        password = str(cfg.get("rdp_password", "")).strip()
-        if password:
-            return password
-
-    raise ValueError(
-        "No RDP password found. Set the ODC_RDP_PASSWORD environment "
-        "variable, or create %APPDATA%\\Inspired\\rdp-credentials.json "
-        "holding a JSON object with an rdp_password key.",
-    )
 
 
 #: Seconds between poll ticks while waiting for the human.
@@ -154,7 +61,7 @@ HEARTBEAT_INTERVAL_S = 20
 #: interacting, and as the window during which human_wait_status reads
 #: COMPLETE (see jobstodo.set_human_wait_complete()) before clear_human_wait()
 #: nulls it - long enough for a poller's toolkit to observe COMPLETE and
-#: disconnect the RDP session before the signal disappears entirely.
+#: disconnect the VNC session before the signal disappears entirely.
 TAKEOVER_PAUSE_S = 5
 
 _BANNER_COLOR_STARTED = "#2980b9"   # blue - informational, process beginning
@@ -261,7 +168,7 @@ _LOGIN_CONFIRM_BUTTON_JS = """
 
 
 def _show_banner(page: Any, message: str, color: str) -> None:
-    """Show or update the on-page banner so a human watching over the RDP
+    """Show or update the on-page banner so a human watching over the VNC
     session gets a visible signal at each stage of the login handoff.
 
     Best-effort - a failed injection (e.g. mid-navigation) must never block
@@ -382,8 +289,6 @@ def wait_for_human_login(
     job_id: str,
     timeout_s: int,
     rdp_host: str,
-    rdp_username: str,
-    rdp_password: str,
     tables: dict,
     dsn: str,
     config: dict,
@@ -404,10 +309,15 @@ def wait_for_human_login(
     portal-specific wording. Added as a trailing, defaulted argument so
     existing positional call sites keep working unchanged.
 
+    0.8.8: dropped the `rdp_username`/`rdp_password` parameters this
+    function briefly took (0.8.1-0.8.7) - this mechanism reverted from RDP
+    back to VNC, which needs only `rdp_host` to connect. See `jobstodo`'s
+    module-level comment and the 0.8.8 Change Log entry for why.
+
     Sequence:
       1. jobstodo.set_human_wait() - writes human_wait_status=PENDING_HUMAN
-         plus the RDP connection details, the cue for a poller's toolkit to
-         open the RDP session.
+         plus the VNC host, the cue for a poller's toolkit to open the VNC
+         session.
       2. Injects the "I'm logged in - continue automation" button and the
          on-page banner, then polls every POLL_INTERVAL_S (up to timeout_s)
          until the button is clicked - the sole trigger for success. See
@@ -416,13 +326,13 @@ def wait_for_human_login(
       3. On success: shows a "taking over" banner, clears the confirm
          button, calls jobstodo.set_human_wait_complete() (writes
          human_wait_status=COMPLETE - the cue for the toolkit to disconnect
-         - and touches nothing else: rdp_host/rdp_username/rdp_password are
-         left exactly as set_human_wait() wrote them), then sleeps
-         TAKEOVER_PAUSE_S before returning True, giving the human a moment
-         to read the banner and stop interacting. jobstodo.clear_human_wait()
-         is deliberately NOT called on this path (see step 4), so a poller
-         can observe COMPLETE - and the RDP details a completed job used -
-         for as long as it needs rather than racing a fixed window.
+         - and touches nothing else: rdp_host is left exactly as
+         set_human_wait() wrote it), then sleeps TAKEOVER_PAUSE_S before
+         returning True, giving the human a moment to read the banner and
+         stop interacting. jobstodo.clear_human_wait() is deliberately NOT
+         called on this path (see step 4), so a poller can observe COMPLETE
+         - and the VNC host a completed job used - for as long as it needs
+         rather than racing a fixed window.
       4. jobstodo.clear_human_wait() runs in a finally, but only fires when
          `success` is False - a genuine failure, a timeout, or an exception
          raised from `is_logged_in()`/the poll loop. Those paths have
@@ -453,13 +363,11 @@ def wait_for_human_login(
     lib-odc-core-spec.md §4.2.
     """
     try:
-        jobstodo.set_human_wait(
-            job_id, timeout_s, rdp_host, rdp_username, rdp_password, tables, dsn,
-        )
+        jobstodo.set_human_wait(job_id, timeout_s, rdp_host, tables, dsn)
     except Exception:
         logger.exception(
             "HUMAN_IN_LOOP - could not set human_wait_status for job %s; continuing "
-            "without the Control Room/RDP signal", job_id,
+            "without the Control Room/VNC signal", job_id,
         )
 
     success = False

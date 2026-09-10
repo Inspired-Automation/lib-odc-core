@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.8.8] - 2026-09-10
+### Changed
+- Reverted the human-assisted-login mechanism from RDP back to VNC
+  (host-only), after tracing a live `human_in_loop.get_rdp_password()`
+  failure back to the actual toolkit transport, which needs only a
+  hostname - no username, no password.
+- `jobstodo.set_human_wait(job_id, timeout_s, rdp_host, tables, dsn)` -
+  dropped the `rdp_username`/`rdp_password` parameters (breaking).
+- `human_in_loop.wait_for_human_login(page, is_logged_in, job_id,
+  timeout_s, rdp_host, tables, dsn, config, started_message=...)` -
+  matching signature change (breaking).
+### Removed
+- `human_in_loop.get_current_windows_username()` (0.8.4) and
+  `human_in_loop.get_rdp_password()` (0.8.6) - no longer needed; VNC
+  requires neither a username nor a password.
+- `ODC_jobs.rdp_username`/`rdp_password` columns, dropped via
+  `ALTER TABLE ... DROP COLUMN` against both `Titan_INSE_DEV` and the live
+  `Titan_INSE` - nothing populates them any more, so they no longer exist
+  rather than sitting unused. `rdp_host` is unaffected.
+
 ## [0.8.7] - 2026-09-10
 ### Added
 - `human_in_loop.get_current_hostname()` - a thin `socket.gethostname()`

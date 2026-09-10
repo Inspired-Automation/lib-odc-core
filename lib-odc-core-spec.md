@@ -141,7 +141,7 @@ get_job_details(process_id: str, job_id: str, tables: dict, dsn: str) -> list[di
 get_multi_credentials(client_id: str, supplier_id: str, tables: dict, dsn: str) -> list[dict]
 revert_to_pending(job_detail_id: str, tables: dict, dsn: str) -> None
 clear_job_claim(job_id: str, tables: dict, dsn: str) -> None
-set_human_wait(job_id: str, timeout_s: int, rdp_host: str, rdp_username: str, rdp_password: str, tables: dict, dsn: str) -> None
+set_human_wait(job_id: str, timeout_s: int, rdp_host: str, tables: dict, dsn: str) -> None
 set_human_wait_complete(job_id: str, tables: dict, dsn: str) -> None
 clear_human_wait(job_id: str, tables: dict, dsn: str) -> None
 ```
@@ -164,7 +164,7 @@ A `job_details` row with no matching `scrape_accounts` row is excluded from
 the result.
 
 `set_human_wait()`/`set_human_wait_complete()`/`clear_human_wait()` (the
-first and last added 0.8.0, `rdp_*` params on `set_human_wait()` and
+first and last added 0.8.0, an `rdp_host` param on `set_human_wait()` and
 `set_human_wait_complete()` itself added 0.8.1) write a job-level
 "waiting for a human-assisted login" signal to `ODC_jobs` - see §4.2. This
 is a separate concern from the `ODC_job_details.status` vocabulary in §4.1:
@@ -179,13 +179,13 @@ failure/timeout exit (`HUMAN_WAIT_COMPLETE` is never written on that path).
 `set_human_wait()` writes `HUMAN_WAIT_PENDING` and computes
 `human_wait_deadline` from `SYSUTCDATETIME()` on the database server, so a
 caller passes the same `timeout_s` its own wait loop uses and the two can
-never drift apart. It also writes the RDS machine and login
-(`rdp_host`/`rdp_username`/`rdp_password`) the poller's toolkit needs to
-open the RDP session behind the login view - the human-assisted flow the
-signal exists for cannot connect without them, so these three are
-required, not optional, arguments. They are stored in plaintext, the same
-pattern already used for portal credentials in `ODC_credentials`/
-`ODC_job_details`.
+never drift apart. It also writes the machine (`rdp_host`) the poller's
+toolkit needs to open the VNC session behind the login view - the
+human-assisted flow the signal exists for cannot connect without it, so
+this is a required, not optional, argument. `rdp_username`/`rdp_password`
+no longer exist on `ODC_jobs` at all (0.8.8 dropped both columns via DDL,
+on both `Titan_INSE_DEV` and the live `Titan_INSE`) - see the naming note
+in §4.2.
 
 Detecting that the human has actually finished logging in is the caller's
 own concern, not this library's - e.g. an in-page confirm button or a
@@ -194,14 +194,11 @@ should not call `set_human_wait()`/`set_human_wait_complete()`/
 `clear_human_wait()` directly at all - see `human_in_loop.wait_for_human_login()`
 (§3.2a), which wraps all three around exactly this kind of poll loop. Once a
 wait loop confirms success, it calls `set_human_wait_complete()`, which
-writes `HUMAN_WAIT_COMPLETE` and touches nothing else (0.8.5) -
-`rdp_host`/`rdp_username`/`rdp_password` and `human_wait_deadline` are left
-exactly as `set_human_wait()` wrote them, so a poller or an audit trail can
-see which RDS machine and login a completed job used. The status change to
-`COMPLETE` is itself the cue for the toolkit to disconnect the RDP session
-- the RDP columns are not repurposed as a second signal, and their
-plaintext values keep sitting in the database until something eventually
-calls `clear_human_wait()`.
+writes `HUMAN_WAIT_COMPLETE` and touches nothing else (0.8.5) - `rdp_host`
+and `human_wait_deadline` are left exactly as `set_human_wait()` wrote
+them, so a poller or an audit trail can see which machine a completed job
+used. The status change to `COMPLETE` is itself the cue for the toolkit to
+disconnect the VNC session.
 `HUMAN_WAIT_COMPLETE` is a **deliberately persistent terminal state**
 (0.8.4) - a caller must **not** also call `clear_human_wait()` immediately
 after a success, since that would erase the very signal a poller is meant
@@ -213,9 +210,7 @@ poller must never read `HUMAN_WAIT_COMPLETE` for a login that didn't
 actually succeed; a caller with its own reason to eventually reset a
 completed row back to `NULL` (once its downstream consumer has finished
 reacting, say) may still call `clear_human_wait()` itself for that, just
-not as an automatic follow-up to `set_human_wait_complete()` - this is
-also the only thing that ever nulls a completed row's plaintext RDP
-credential, so something should call it eventually.
+not as an automatic follow-up to `set_human_wait_complete()`.
 
 Neither `set_human_wait()`, `set_human_wait_complete()`, nor
 `clear_human_wait()` raises on its own for a missing column - if the
@@ -233,8 +228,6 @@ wait_for_human_login(
     job_id: str,
     timeout_s: int,
     rdp_host: str,
-    rdp_username: str,
-    rdp_password: str,
     tables: dict,
     dsn: str,
     config: dict,
@@ -242,8 +235,6 @@ wait_for_human_login(
 ) -> bool
 
 get_current_hostname() -> str
-get_current_windows_username() -> str
-get_rdp_password() -> str
 ```
 
 `started_message` (0.8.4, trailing/defaulted - existing positional call
@@ -258,45 +249,20 @@ the "taking over" and "no response" banners stay fixed, generic text, since
 neither references anything portal-specific.
 
 `get_current_hostname()` (0.8.7) builds the `rdp_host` argument above from
-this run node's own `socket.gethostname()`, for the same reason as
-`get_current_windows_username()` below: the toolkit's RDP session needs to
-reach whichever machine is actually running this process, wherever it was
-deployed, so a config value would just be one more thing to keep in sync
-and would drift once RDS machines are assigned dynamically per run.
+this run node's own `socket.gethostname()`: the toolkit's VNC session needs
+to reach whichever machine is actually running this process, wherever it
+was deployed, so a config value would just be one more thing to keep in
+sync and would drift once machines are assigned dynamically per run.
 `automation-odc-energia`'s `main.py` had been calling `socket.gethostname()`
-inline since before this existed - centralised here for consistency with
-the other two `rdp_*` helpers, not because the inline call was wrong.
+inline since before this existed - centralised here for consistency, not
+because the inline call was wrong.
 
-`get_current_windows_username()` (0.8.4) builds the `rdp_username` argument
-above from the Windows account the bot's own process is actually signed in
-as, rather than a static per-supplier config value that can drift once RDS
-machines are assigned dynamically per run (see `rdp_host`'s own note in
-§4.2). Returns it domain-qualified, `DOMAIN\username` (0.8.6) - confirmed
-against a live RDP connection panel expecting exactly that form (e.g.
-`INSPIREDENERGYS\svc.UATbotrunner01`); a bare username risks resolving to
-the wrong account or the RDP client rejecting it outright.
-`getpass.getuser()` alone only returns the bare name (from the `USERNAME`
-environment variable, which carries no domain); this prepends
-`USERDOMAIN`, the environment variable Windows sets alongside it for
-exactly this purpose - covers both AD-domain and local (non-domain)
-accounts, since Windows sets `USERDOMAIN` to the local computer name for
-the latter. Falls back to the bare username if `USERDOMAIN` is unset.
-`getpass.getuser()` itself raises `OSError` if no username can be
-determined at all - not expected here, since the wait already requires an
-interactive desktop session.
-
-`get_rdp_password()` (0.8.6) is the password half of the same problem, but
-unlike the username it has no OS-derivable answer at all - Windows does
-not let a process read back its own logon password. Reads, in order of
-precedence, the `ODC_RDP_PASSWORD` environment variable, or a JSON object
-with an `rdp_password` key at `%APPDATA%\Inspired\rdp-credentials.json`.
-Mirrors `automation-odc-energia`'s `.claude/cr.py:settings()` - the org's
-only other precedent for a secret scoped to one specific machine rather
-than the whole team (`team.yaml` is the wrong shape: every RDS machine has
-a different account and password). Whatever provisions the run node -
-creates the local Windows account, sets its password - must write that
-same value to one of these two places; this function only reads it back.
-Raises `ValueError` if neither source has a value.
+0.8.8 removed `get_current_windows_username()` (0.8.4) and
+`get_rdp_password()` (0.8.6) entirely, along with the `rdp_username`/
+`rdp_password` arguments they built: this mechanism was briefly (0.8.1-0.8.7)
+built around RDP, which needs a username and password to connect, before it
+turned out the actual toolkit connects over VNC, which needs only a host.
+See §4.2's naming note and the 0.8.8 Change Log entry in `CLAUDE.md`.
 
 Added 0.8.1, generalised out of `automation-odc-energia`'s Phase 3 (see
 `docs/energia-human-assisted-login-control-room-contract.md` in that repo,
@@ -321,7 +287,7 @@ an exception it raises propagates out of `wait_for_human_login()` itself
 
 What it does, end to end:
 
-1. `jobstodo.set_human_wait(job_id, timeout_s, rdp_host, rdp_username, rdp_password, tables, dsn)`.
+1. `jobstodo.set_human_wait(job_id, timeout_s, rdp_host, tables, dsn)`.
 2. Injects a fixed "I'm logged in - continue automation" button (a DOM
    attribute - `element.dataset.confirmed` - read back via `page.evaluate()`
    each tick; not `page.expose_function()`, and not a `window.*` global -
@@ -568,7 +534,7 @@ callers that mutate data commit explicitly inside their `work(conn)` callable.
 
 | Object | Used by | Purpose |
 |--------|---------|---------|
-| `ODC_jobs` | `jobstodo`, `duplicate_check` | One row per supplier job. `process_id` is the claim marker; `human_wait_status`/`human_wait_deadline` (0.8.0) plus `rdp_host`/`rdp_username`/`rdp_password` (0.8.1) are the job-level human-assisted-login signal and its RDP connection details - see §4.2. |
+| `ODC_jobs` | `jobstodo`, `duplicate_check` | One row per supplier job. `process_id` is the claim marker; `human_wait_status`/`human_wait_deadline` (0.8.0) plus `rdp_host` (0.8.1) are the job-level human-assisted-login signal and its VNC connection details - see §4.2. `rdp_username`/`rdp_password` (also 0.8.1) were dropped entirely in 0.8.8 (naming/history in §4.2). |
 | `ODC_job_details` | `jobstodo`, `duplicate_check`, `updatejobdetails` | One row per account to collect. Carries `status`. |
 | `ODC_scrape_data` | `file_save_as`, `duplicate_check` | One row per downloaded document. |
 | `ODC_scrape_accounts` | `jobstodo`, `duplicate_check` | Inspired PLC account pool; also the source of `sug_internal_id` for every client via `jobstodo.get_job_details()`. |
@@ -594,7 +560,7 @@ IN PROGRESS, FOUND, REQUIRES RETRY, MISSING PARENT
 for sub-1 KB downloads. `pending` (lowercase) is the pre-run state of a
 `job_details` row and is not part of the vocabulary above.
 
-### 4.2 Human-wait signal (added 0.8.0; RDP fields, the PENDING/COMPLETE lifecycle, and `human_wait_started_at`'s removal all added in 0.8.1)
+### 4.2 Human-wait signal (added 0.8.0; RDP fields and the PENDING/COMPLETE lifecycle added 0.8.1, reverted to VNC/host-only in 0.8.8)
 
 A separate, job-level signal on `ODC_jobs`, distinct from §4.1's per-account
 vocabulary. Written only by `jobstodo.set_human_wait()`/
@@ -612,19 +578,30 @@ the DDL below: the applied `human_wait_status` is `VARCHAR(50)`, not
 ALTER TABLE dbo.ODC_jobs ADD
     human_wait_status   NVARCHAR(30)  NULL,   -- NULL = not waiting (or a failure/timeout exit); 'PENDING_HUMAN' = waiting; 'COMPLETE' = human finished (persists - not auto-cleared)
     human_wait_deadline DATETIME2     NULL,   -- UTC, set when the wait begins = SYSUTCDATETIME() + timeout_s
-    rdp_host             NVARCHAR(255) NULL,   -- RDS machine hostname/IP for the human-assisted RDP session
-    rdp_username          NVARCHAR(128) NULL,   -- RDP login for rdp_host
-    rdp_password          NVARCHAR(256) NULL;   -- RDP password for rdp_host, plaintext (see below)
+    rdp_host             NVARCHAR(255) NULL;   -- machine hostname/IP for the human-assisted VNC session (see naming note below)
 ```
+
+**Naming note (0.8.8):** this mechanism was briefly (0.8.1-0.8.7) built
+around RDP, adding `rdp_username`/`rdp_password` columns alongside
+`rdp_host` to connect. It reverted to VNC once it turned out that's the
+actual toolkit transport, which needs only a host - `rdp_username`/
+`rdp_password` were dropped from `ODC_jobs` entirely via
+`ALTER TABLE ... DROP COLUMN` (2026-09-10, on both `Titan_INSE_DEV` and the
+live `Titan_INSE` - confirmed via `INFORMATION_SCHEMA.COLUMNS` immediately
+after), since nothing was ever going to populate them again. `rdp_host`
+itself keeps its name despite now carrying a VNC host rather than an RDP
+one - renaming it would need its own separate DDL coordination for no
+functional benefit, so it wasn't requested. This is the same kind of
+documented drift as `human_wait_status` being `VARCHAR(50)` instead of
+`NVARCHAR(30)` above - noted here rather than fixed via a schema change.
 
 `human_wait_status` lifecycle - `NULL` -> `PENDING_HUMAN` -> `COMPLETE`
 (terminal) on success, or `NULL` directly on a failure/timeout exit
 (`COMPLETE` never written on that path):
 
 1. **`set_human_wait()`** writes `human_wait_status = 'PENDING_HUMAN'`
-   (`jobstodo.HUMAN_WAIT_PENDING`), `human_wait_deadline`, and
-   `rdp_host`/`rdp_username`/`rdp_password` - the cue for a poller's
-   toolkit to open the RDP session and connect.
+   (`jobstodo.HUMAN_WAIT_PENDING`), `human_wait_deadline`, and `rdp_host` -
+   the cue for a poller's toolkit to open the VNC session and connect.
 2. The caller's own wait loop - not this library - detects the human has
    actually finished logging in (e.g. `automation-odc-energia`'s
    `wait_for_human_login()` polls an in-page "I'm logged in" button and a
@@ -632,28 +609,18 @@ ALTER TABLE dbo.ODC_jobs ADD
    never reads `ODC_jobs` for this).
 3. On confirmed success, **`set_human_wait_complete()`** writes
    `human_wait_status = 'COMPLETE'` (`jobstodo.HUMAN_WAIT_COMPLETE`) and
-   touches nothing else (0.8.5) - `rdp_host`/`rdp_username`/`rdp_password`
-   and `human_wait_deadline` are left exactly as `set_human_wait()` wrote
-   them. The status change to `COMPLETE` is itself the cue for the toolkit
-   to disconnect the RDP session; the RDP columns keep their plaintext
-   values (for a poller/audit trail to see which machine and login a
-   completed job used) until something eventually calls
-   `clear_human_wait()`. `COMPLETE` is a **persistent terminal state**
-   (0.8.4): the caller must not also call `clear_human_wait()` right after
-   this, since a poller needs to be able to observe `COMPLETE` without
-   racing a fixed time budget before it disappears.
-4. **`clear_human_wait()`** nulls all five columns, including
+   touches nothing else (0.8.5) - `rdp_host` and `human_wait_deadline` are
+   left exactly as `set_human_wait()` wrote them. The status change to
+   `COMPLETE` is itself the cue for the toolkit to disconnect the VNC
+   session. `COMPLETE` is a **persistent terminal state** (0.8.4): the
+   caller must not also call `clear_human_wait()` right after this, since a
+   poller needs to be able to observe `COMPLETE` without racing a fixed
+   time budget before it disappears.
+4. **`clear_human_wait()`** nulls all three remaining columns, including
    `human_wait_status` itself, on a failure or timeout exit - one where
    step 3 was never reached, so the row is still at `PENDING_HUMAN`. There
    is nothing worth keeping on that path, so it resets straight to `NULL`
-   rather than lingering. It is also the only mechanism that ever nulls a
-   `HUMAN_WAIT_COMPLETE` row's plaintext RDP credential, for a caller that
-   wants one eventually cleared - as of 0.8.5 nothing does this
-   automatically on a success path (see spec history: before 0.8.4 this ran
-   unconditionally on every exit path, clearing a successful `COMPLETE`
-   back to `NULL` moments
-   later - found in live testing to leave pollers too small a window to
-   reliably observe it.)
+   rather than lingering.
 
 Column notes:
 
@@ -662,25 +629,17 @@ Column notes:
   configured timeout - it only compares its own clock against
   `human_wait_deadline`. Meaningless once `human_wait_status` leaves
   `PENDING_HUMAN`; not read again after that.
-- `rdp_host` / `rdp_username` / `rdp_password`: the RDS machine and login a
-  poller's toolkit uses to open the RDP session behind the login view - the
-  human-assisted flow this signal exists for cannot connect without them.
-  Assigned per-job (the bot is handed a machine per run, not a fixed shared
-  one), so these are written fresh by every `set_human_wait()` call rather
-  than read from static config. Stored in plaintext, matching the existing
-  portal-credential pattern in `ODC_credentials`/`ODC_job_details`; treat
-  this as a genuinely higher-privilege credential than a portal login (RDP
-  access to a machine, not a single supplier website). As of 0.8.5,
-  `set_human_wait_complete()` leaves these untouched (an explicit choice -
-  a completed job's RDS machine/login stays visible for as long as
-  `HUMAN_WAIT_COMPLETE` persists, for audit purposes or a toolkit that
-  needs to re-confirm which session to close); only `clear_human_wait()`
-  ever nulls them, on a failure/timeout exit. Since `HUMAN_WAIT_COMPLETE` is
-  a persistent terminal state that nothing clears automatically (see
-  above), the plaintext RDP password on a successfully completed row can
-  sit in Titan indefinitely unless a caller separately calls
-  `clear_human_wait()` itself once it is done with the row - this is a
-  known, deliberate tradeoff, not an oversight.
+- `rdp_host`: the machine a poller's toolkit uses to open the VNC session
+  behind the login view - the human-assisted flow this signal exists for
+  cannot connect without it. Assigned per-job (the bot is handed a machine
+  per run, not a fixed shared one), so it is written fresh by every
+  `set_human_wait()` call rather than read from static config.
+- `rdp_username` / `rdp_password`: dropped entirely in 0.8.8 - see the
+  naming note above. Before that (0.8.1-0.8.7) these held the RDP
+  login/password in plaintext, matching the existing portal-credential
+  pattern in `ODC_credentials`/`ODC_job_details`; that plaintext-RDP-password
+  concern no longer applies now that VNC needs no credential to store, and
+  there are no columns left to leak one from.
 - All three functions raise the underlying `pyodbc.Error` if these columns
   don't exist yet on the target database (this is an additive, opt-in
   schema change - see the DDL above); callers should treat that as "no

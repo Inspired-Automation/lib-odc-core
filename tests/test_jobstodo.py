@@ -152,32 +152,32 @@ def test_clear_job_claim_commits(mock_connect):
 
 
 @patch("odc_core.db.pyodbc.connect")
-def test_set_human_wait_commits_with_status_timeout_rdp_and_job_id(mock_connect):
+def test_set_human_wait_commits_with_status_timeout_host_and_job_id(mock_connect):
     cursor = MagicMock()
     conn = _connect_mock(cursor)
     mock_connect.return_value = conn
 
-    jobstodo.set_human_wait("JOB1", 600, "RDS01", "rdpuser", "rdppass", TABLES, "Jupiter")
+    jobstodo.set_human_wait("JOB1", 600, "RDS01", TABLES, "Jupiter")
 
     cursor.execute.assert_called_once()
     sql, params = cursor.execute.call_args.args[0], cursor.execute.call_args.args[1:]
     assert "human_wait_status" in sql
     assert "human_wait_deadline" in sql
     assert "rdp_host" in sql
-    assert "rdp_username" in sql
-    assert "rdp_password" in sql
-    assert params == (
-        jobstodo.HUMAN_WAIT_PENDING, 600, "RDS01", "rdpuser", "rdppass", "JOB1",
-    )
+    # 0.8.8: rdp_username/rdp_password were dropped from ODC_jobs entirely
+    # (this mechanism reverted from RDP to VNC, host-only) - no longer
+    # exist to appear in this SQL at all.
+    assert "rdp_username" not in sql
+    assert "rdp_password" not in sql
+    assert params == (jobstodo.HUMAN_WAIT_PENDING, 600, "RDS01", "JOB1")
     conn.commit.assert_called_once()
 
 
 @patch("odc_core.db.pyodbc.connect")
 def test_set_human_wait_complete_only_updates_status(mock_connect):
-    # 0.8.5: rdp_host/rdp_username/rdp_password and human_wait_deadline are
-    # deliberately left untouched - only human_wait_status changes, so a
-    # poller/audit trail can see which machine and login a completed job
-    # used.
+    # 0.8.5: rdp_host and human_wait_deadline are deliberately left
+    # untouched - only human_wait_status changes, so a poller/audit trail
+    # can see which machine a completed job used.
     cursor = MagicMock()
     conn = _connect_mock(cursor)
     mock_connect.return_value = conn
@@ -207,7 +207,8 @@ def test_clear_human_wait_commits(mock_connect):
     sql, params = cursor.execute.call_args.args[0], cursor.execute.call_args.args[1:]
     assert "human_wait_status = NULL" in sql
     assert "rdp_host = NULL" in sql
-    assert "rdp_username = NULL" in sql
-    assert "rdp_password = NULL" in sql
+    # 0.8.8: rdp_username/rdp_password were dropped from ODC_jobs entirely.
+    assert "rdp_username" not in sql
+    assert "rdp_password" not in sql
     assert params == ("JOB1",)
     conn.commit.assert_called_once()

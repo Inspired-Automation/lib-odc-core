@@ -27,9 +27,8 @@ entry point of its own.
   for `client_name == "inspired plc"` duplicate checks), and the stored
   procedure `spODC_job_details_UpdateStatus`.
   `ODC_jobs` also carries five columns added in 0.8.0/0.8.1 -
-  `human_wait_status`/`human_wait_deadline` (0.8.0) and
-  `rdp_host`/`rdp_username`/`rdp_password` (0.8.1, plaintext RDS
-  connection details for the human-assisted RDP session) - written only by
+  `human_wait_status`/`human_wait_deadline` (0.8.0) and `rdp_host`/
+  `rdp_username`/`rdp_password` (0.8.1) - written only by
   `jobstodo.set_human_wait()`/`set_human_wait_complete()`/`clear_human_wait()`;
   see spec §4.2. **Confirmed applied to both `Titan_INSE_DEV` and the live
   `Titan_INSE`** (queried directly 2026-09-09 via `INFORMATION_SCHEMA.COLUMNS`).
@@ -42,6 +41,14 @@ entry point of its own.
   design but dropped before any DDL request went out - nothing reads it (and
   it does not exist on `Titan_INSE_DEV` either), so only `human_wait_deadline`
   is kept.
+  **0.8.8**: this mechanism reverted from RDP back to VNC (see the Change
+  Log entry) - only `rdp_host` is still written (it now carries a VNC host,
+  a deliberate naming drift kept to avoid a DDL change - see spec §4.2).
+  `rdp_username`/`rdp_password` were dropped from `ODC_jobs` entirely via
+  `ALTER TABLE ... DROP COLUMN` on both `Titan_INSE_DEV` and the live
+  `Titan_INSE` (2026-09-10, confirmed via `INFORMATION_SCHEMA.COLUMNS`
+  immediately after) - so `ODC_jobs` now carries four of these columns, not
+  five.
 - `ODC_suppliers` (pre-existing, not owned by this library) carries
   `human_in_loop` (nullable `tinyint`) - a **per-supplier**, not per-job,
   flag for "does this supplier's login require a human". Confirmed on both
@@ -175,32 +182,37 @@ entry point of its own.
   these two statuses to mean "try again on a later run" needs its own
   reset mechanism (or to run as a multi-credential job, whose status filter
   does not exclude them); today no such mechanism exists.
-- `jobstodo.set_human_wait()` (0.8.1) writes `rdp_host`/`rdp_username`/
-  `rdp_password` to `ODC_jobs` in plaintext - consistent with how portal
-  credentials are already stored in `ODC_credentials`/`ODC_job_details`, but
-  an RDS machine login is a higher-privilege credential than a single
-  supplier portal login. As of 0.8.5, `set_human_wait_complete()` leaves
-  the three RDP columns untouched (an explicit choice - see the Change Log
-  - so a completed job's machine/login stays visible for as long as
-  `COMPLETE` persists, for audit purposes or a toolkit re-confirming which
-  session to close); only `clear_human_wait()` ever nulls them, on a
-  failure/timeout exit. Since `COMPLETE` persists indefinitely and nothing
-  clears it automatically, a successfully completed row's plaintext RDP
-  password can sit in Titan indefinitely too, unless a caller separately
-  calls `clear_human_wait()` once it's done with the row - a known,
-  deliberate tradeoff. A caller that never does that (crash before the
-  `finally` on a failure path, or simply never bothering on a success path)
-  leaves a live RDP credential sitting in Titan until someone notices and
-  clears it manually - there is no separate expiry/sweep job today.
-- `human_in_loop.get_rdp_password()` (0.8.6) only *reads* the run node's
-  RDP password (env var or `%APPDATA%\Inspired\rdp-credentials.json`) - it
-  has no way to create, verify, or discover one. This library has no
-  visibility into whatever actually provisions the run node/RDS machine
-  fleet, so it cannot confirm that provisioning process writes the
-  password to either location; if it doesn't, this raises `ValueError` at
-  the exact moment a job needs it. Unlike `get_current_windows_username()`
-  (which is genuinely derived from the OS and cannot drift), this is only
-  as reliable as whatever external process is expected to keep it in sync.
+- **Superseded by 0.8.8 (kept for history):** `jobstodo.set_human_wait()`
+  (0.8.1) wrote `rdp_host`/`rdp_username`/`rdp_password` to `ODC_jobs` in
+  plaintext - consistent with how portal credentials are already stored in
+  `ODC_credentials`/`ODC_job_details`, but an RDS machine login is a
+  higher-privilege credential than a single supplier portal login. As of
+  0.8.5, `set_human_wait_complete()` left the three RDP columns untouched
+  (an explicit choice - so a completed job's machine/login stayed visible
+  for as long as `COMPLETE` persisted, for audit purposes or a toolkit
+  re-confirming which session to close); only `clear_human_wait()` ever
+  nulled them, on a failure/timeout exit. Since `COMPLETE` persisted
+  indefinitely and nothing cleared it automatically, a successfully
+  completed row's plaintext RDP password could sit in Titan indefinitely
+  too, unless a caller separately called `clear_human_wait()` once it was
+  done with the row. **0.8.8 resolved this by removing the problem rather
+  than managing it**: this mechanism reverted from RDP to VNC, which needs
+  no username/password to connect, so `rdp_username`/`rdp_password` were
+  dropped from `ODC_jobs` entirely (on both `Titan_INSE_DEV` and the live
+  `Titan_INSE`) rather than merely left unpopulated - there is no column
+  left to leak a plaintext credential from.
+- **Superseded by 0.8.8 (kept for history):** `human_in_loop.get_rdp_password()`
+  (0.8.6) only *read* the run node's RDP password (env var or
+  `%APPDATA%\Inspired\rdp-credentials.json`) - it had no way to create,
+  verify, or discover one, and depended entirely on whatever provisioned
+  the run node writing that value there first; if it didn't, this raised
+  `ValueError` at the exact moment a job needed it (this is, in fact, the
+  warning that led to discovering the mechanism should be VNC, not RDP, in
+  the first place - see the 0.8.8 Change Log entry). Removed entirely in
+  0.8.8, along with `get_current_windows_username()` - VNC needs neither a
+  username nor a password, so both functions and the fragile
+  provisioning-must-write-a-file-somewhere dependency they required are
+  gone.
 - Detecting that a human has actually finished a human-assisted login is
   deliberately outside `jobstodo`'s scope - `set_human_wait_complete()` only
   records that it happened, it never detects it itself. As of 0.8.1 this
@@ -234,6 +246,55 @@ entry point of its own.
   the same reason - never add another `window.*` global here.
 
 ## Change Log
+- 2026-09-10: v0.8.8 - reverted the human-assisted-login mechanism from RDP
+  back to VNC (host-only), undoing the `rdp_username`/`rdp_password`
+  additions from 0.8.1-0.8.7. Traced from a live warning
+  (`human_in_loop.get_rdp_password()` raising `ValueError` on a run node
+  with neither `ODC_RDP_PASSWORD` nor `%APPDATA%\Inspired\rdp-credentials.json`
+  set) back to the actual infra: `automation-odc-energia`'s toolkit connects
+  over VNC, which needs only a hostname - no username, no password. Several
+  of that project's own artifacts never stopped saying so even after the
+  0.8.1 RDP pivot (its `main.py`/`energia_supplier.py` module docstrings
+  still said "noVNC", its config key stayed named `vnc:`, and
+  `docs/energia-human-assisted-login-control-room-contract.md` was written
+  entirely in VNC/noVNC terms and never mentioned the RDP fields at all) -
+  the RDP username/password design was solving a problem this transport
+  doesn't have.
+  - `jobstodo.set_human_wait(job_id, timeout_s, rdp_host, tables, dsn)` -
+    dropped the `rdp_username`/`rdp_password` parameters. Also now
+    explicitly nulls both columns on every call (not just omits them), so
+    no stale plaintext value from before this revert survives a job
+    re-entering `PENDING_HUMAN`.
+  - `human_in_loop.wait_for_human_login(page, is_logged_in, job_id,
+    timeout_s, rdp_host, tables, dsn, config, started_message=...)` -
+    matching signature change.
+  - Removed `human_in_loop.get_current_windows_username()` (0.8.4) and
+    `human_in_loop.get_rdp_password()` (0.8.6) entirely - VNC needs neither.
+    Kept `get_current_hostname()` (0.8.7) unchanged; a hostname is exactly
+    what a VNC session needs too.
+  - **`rdp_username`/`rdp_password` dropped from `ODC_jobs` via DDL
+    (2026-09-10, same day)**: unlike `rdp_host` (kept unchanged despite now
+    carrying a VNC host rather than an RDP one - a rename would need its
+    own separate DDL coordination for no functional benefit), these two
+    columns had no reason to stick around once nothing was ever going to
+    populate them again - `ALTER TABLE dbo.ODC_jobs DROP COLUMN
+    rdp_username, rdp_password` was run directly against both
+    `Titan_INSE_DEV` and the live `Titan_INSE`, confirmed via
+    `INFORMATION_SCHEMA.COLUMNS` immediately after (one row on
+    `Titan_INSE_DEV` had a non-NULL value from earlier RDP-era testing -
+    live had none - both are gone now regardless). `rdp_host`'s own naming
+    drift is still the same kind noted for `human_wait_status` being
+    `VARCHAR(50)` instead of the spec's `NVARCHAR(30)` - see Databases
+    above and spec §4.2's naming note.
+  - **Resolves, rather than just manages, a standing security concern**:
+    every Known Gotchas entry about a completed job's plaintext RDP
+    password sitting in Titan indefinitely no longer applies - there is no
+    column left to leak a password from. See the superseded entries below,
+    kept for history.
+  - `automation-odc-energia` (the only current `human_in_loop=1` consumer)
+    needs matching updates before either side of this actually works
+    end-to-end - tracked as a separate, parallel change in that repo's own
+    `CLAUDE.md`.
 - 2026-09-10: v0.8.7 - added `human_in_loop.get_current_hostname()`, a thin
   `socket.gethostname()` wrapper for the `rdp_host` argument, completing
   the set of three `rdp_*` helpers alongside `get_current_windows_username()`
@@ -496,13 +557,25 @@ entry point of its own.
   `automation-odc-totalenergies-gas-power-ltd`,
   `automation-odc-castle-water-ltd`, and `automation-odc-source-for-business`
   still need this (`automation-odc-energia` already has it - see above).
-- Retroactively confirm the plaintext storage of
-  `rdp_host`/`rdp_username`/`rdp_password` on `ODC_jobs` (already applied to
-  both `Titan_INSE_DEV` and `Titan_INSE` - see Databases above) is
-  acceptable to whoever owns Titan security/compliance - it is a
-  higher-privilege credential (RDP access to a machine) than the portal
-  logins already stored in `ODC_credentials`, even though it follows the
-  same plaintext pattern.
+- **Resolved by v0.8.8** (was: retroactively confirm the plaintext storage
+  of `rdp_username`/`rdp_password` on `ODC_jobs` is acceptable to whoever
+  owns Titan security/compliance) - moot now that both columns were dropped
+  from `ODC_jobs` entirely (2026-09-10, on both `Titan_INSE_DEV` and the
+  live `Titan_INSE`); nothing left to confirm. `rdp_host` alone remains and
+  is just a hostname, not a credential.
+- **Resolved by v0.8.8**: `rdp_username`/`rdp_password` were dropped from
+  `ODC_jobs` via `ALTER TABLE ... DROP COLUMN`, run directly against both
+  `Titan_INSE_DEV` and the live `Titan_INSE` and confirmed via
+  `INFORMATION_SCHEMA.COLUMNS` immediately after - see the Change Log entry.
+  `rdp_host` itself was not renamed (no functional benefit, would need its
+  own separate DDL coordination) - see spec §4.2's naming note if that's
+  ever revisited.
+- Cut a `v0.8.8` release with the built wheel attached, following
+  `RELEASING.md`. `automation-odc-energia` (the only current
+  `human_in_loop=1` consumer) needs to pin `v0.8.8` and update its own
+  `main.py`/`energia_supplier.py` call sites before either side of the
+  RDP-to-VNC revert actually works end-to-end - tracked in that repo's own
+  CLAUDE.md, not here.
 - Cut a `v0.8.3` release with the built wheel attached, following
   `RELEASING.md` - supersedes both `v0.8.1` (premature-takeover bug) and
   `v0.8.2` (window-global confirm-button bug under patchright's isolated
@@ -515,11 +588,13 @@ entry point of its own.
   fix) instead of hanging until timeout.
 - `automation-odc-energia`'s own
   `docs/energia-human-assisted-login-control-room-contract.md` still
-  documents the pre-migration design throughout - the old two-state
-  (`WAITING_FOR_HUMAN`/`NULL`) lifecycle, the old
-  `set_human_wait(job_id, timeout_s, tables, dsn)` signature, and noVNC as
-  the transport instead of RDP - needs a rewrite to match what's actually
-  running now.
+  documents the pre-0.8.1 two-state (`WAITING_FOR_HUMAN`/`NULL`) lifecycle
+  and the old `set_human_wait(job_id, timeout_s, tables, dsn)` signature -
+  needs a rewrite to match the current `PENDING_HUMAN`/`COMPLETE` lifecycle
+  and 0.8.8's signature. Its noVNC/VNC framing, on the other hand, no
+  longer needs correcting - v0.8.8 reverted the mechanism back to VNC, so
+  that part of the doc turned out to already be right; it was the RDP-era
+  code that had drifted from it, not the other way around.
 - Cut a `v0.7.0` release with the built wheel attached, following
   `RELEASING.md`. Any supplier project whose jobs can carry
   `client_name == "inspired plc"` rows (at least `automation-odc-wave` and
