@@ -23,6 +23,97 @@ def test_get_current_hostname_wraps_socket(mock_gethostname):
     mock_gethostname.assert_called_once_with()
 
 
+def test_get_current_session_id_reads_via_kernel32(monkeypatch):
+    def fake_process_id_to_session_id(pid, session_id_ref):
+        session_id_ref._obj.value = 3
+        return 1  # non-zero == success
+
+    monkeypatch.setattr(
+        human_in_loop.ctypes.windll.kernel32,
+        "ProcessIdToSessionId",
+        fake_process_id_to_session_id,
+        raising=False,
+    )
+
+    assert human_in_loop.get_current_session_id() == 3
+
+
+def test_get_current_session_id_raises_on_failure(monkeypatch):
+    monkeypatch.setattr(
+        human_in_loop.ctypes.windll.kernel32,
+        "ProcessIdToSessionId",
+        lambda pid, session_id_ref: 0,  # 0 == failure
+        raising=False,
+    )
+
+    try:
+        human_in_loop.get_current_session_id()
+        raised = False
+    except OSError:
+        raised = True
+
+    assert raised is True
+
+
+@patch("odc_core.human_in_loop.socket.create_connection")
+@patch("odc_core.human_in_loop.subprocess.Popen")
+def test_start_vnc_server_launches_and_confirms_port_open(mock_popen, mock_create_connection):
+    result = human_in_loop.start_vnc_server(3)
+
+    assert result is True
+    mock_popen.assert_called_once_with(["tvnserver", "-run"])
+    mock_create_connection.assert_called_once_with(
+        ("127.0.0.1", human_in_loop.VNC_PORT_BASE + 3),
+        timeout=human_in_loop.VNC_PORT_POLL_INTERVAL_S,
+    )
+
+
+@patch("odc_core.human_in_loop.subprocess.Popen", side_effect=FileNotFoundError("no tvnserver"))
+def test_start_vnc_server_swallows_launch_failure(mock_popen):
+    result = human_in_loop.start_vnc_server(3)  # must not raise
+
+    assert result is False
+    mock_popen.assert_called_once()
+
+
+@patch("odc_core.human_in_loop.time.sleep")
+@patch("odc_core.human_in_loop.socket.create_connection", side_effect=OSError("refused"))
+@patch("odc_core.human_in_loop.subprocess.Popen")
+def test_start_vnc_server_times_out_when_port_never_opens(
+    mock_popen, mock_create_connection, mock_sleep,
+):
+    result = human_in_loop.start_vnc_server(3, timeout_s=0.01)
+
+    assert result is False
+    mock_create_connection.assert_called()
+
+
+@patch("odc_core.human_in_loop.start_vnc_server")
+@patch("odc_core.human_in_loop.get_current_session_id", return_value=3)
+@patch("odc_core.human_in_loop.get_current_hostname", return_value="MAN-RDS-V12")
+def test_prepare_vnc_session_resolves_and_starts_when_human_in_loop_truthy(
+    mock_get_hostname, mock_get_session_id, mock_start_vnc,
+):
+    result = human_in_loop.prepare_vnc_session(1)
+
+    assert result == ("MAN-RDS-V12", 3)
+    mock_start_vnc.assert_called_once_with(3, timeout_s=human_in_loop.VNC_PORT_POLL_TIMEOUT_S)
+
+
+@patch("odc_core.human_in_loop.start_vnc_server")
+@patch("odc_core.human_in_loop.get_current_session_id")
+@patch("odc_core.human_in_loop.get_current_hostname")
+def test_prepare_vnc_session_returns_none_when_human_in_loop_falsy(
+    mock_get_hostname, mock_get_session_id, mock_start_vnc,
+):
+    for falsy in (None, 0, False):
+        assert human_in_loop.prepare_vnc_session(falsy) is None
+
+    mock_get_hostname.assert_not_called()
+    mock_get_session_id.assert_not_called()
+    mock_start_vnc.assert_not_called()
+
+
 def _banner_messages(page: MagicMock) -> list[str]:
     return [
         call.args[1]["message"]
@@ -40,7 +131,7 @@ def test_started_message_defaults_to_generic_wording(mock_sleep, mock_set, mock_
 
     human_in_loop.wait_for_human_login(
         page, MagicMock(return_value=False), "JOB1", 600,
-        "RDS01", TABLES, "Jupiter", {},
+        "RDS01", 3, TABLES, "Jupiter", {},
     )
 
     assert human_in_loop.DEFAULT_STARTED_MESSAGE in _banner_messages(page)
@@ -56,7 +147,7 @@ def test_started_message_override_reaches_banner(mock_sleep, mock_set, mock_comp
 
     human_in_loop.wait_for_human_login(
         page, MagicMock(return_value=False), "JOB1", 600,
-        "RDS01", TABLES, "Jupiter", {},
+        "RDS01", 3, TABLES, "Jupiter", {},
         started_message=custom,
     )
 
@@ -79,11 +170,11 @@ def test_success_via_button_click_completes_and_does_not_clear(
     is_logged_in = MagicMock(return_value=False)
 
     result = human_in_loop.wait_for_human_login(
-        page, is_logged_in, "JOB1", 600, "RDS01", TABLES, "Jupiter", {},
+        page, is_logged_in, "JOB1", 600, "RDS01", 3, TABLES, "Jupiter", {},
     )
 
     assert result is True
-    mock_set.assert_called_once_with("JOB1", 600, "RDS01", TABLES, "Jupiter")
+    mock_set.assert_called_once_with("JOB1", 600, "RDS01", 3, TABLES, "Jupiter")
     mock_complete.assert_called_once_with("JOB1", TABLES, "Jupiter")
     mock_clear.assert_not_called()
     mock_sleep.assert_called_once_with(human_in_loop.TAKEOVER_PAUSE_S)
@@ -104,7 +195,7 @@ def test_is_logged_in_alone_does_not_trigger_success(
     is_logged_in = MagicMock(return_value=True)
 
     result = human_in_loop.wait_for_human_login(
-        page, is_logged_in, "JOB1", 0, "RDS01", TABLES, "Jupiter", {},
+        page, is_logged_in, "JOB1", 0, "RDS01", 3, TABLES, "Jupiter", {},
     )
 
     assert result is False
@@ -124,7 +215,7 @@ def test_timeout_returns_false_and_never_completes(
     is_logged_in = MagicMock(return_value=False)
 
     result = human_in_loop.wait_for_human_login(
-        page, is_logged_in, "JOB1", 0, "RDS01", TABLES, "Jupiter", {},
+        page, is_logged_in, "JOB1", 0, "RDS01", 3, TABLES, "Jupiter", {},
     )
 
     assert result is False
@@ -144,7 +235,7 @@ def test_set_human_wait_failure_is_swallowed_and_wait_still_runs(
     is_logged_in = MagicMock(return_value=False)
 
     result = human_in_loop.wait_for_human_login(
-        page, is_logged_in, "JOB1", 600, "RDS01", TABLES, "Jupiter", {},
+        page, is_logged_in, "JOB1", 600, "RDS01", 3, TABLES, "Jupiter", {},
     )
 
     assert result is True
@@ -166,7 +257,7 @@ def test_clear_human_wait_failure_is_swallowed(
     is_logged_in = MagicMock(return_value=False)
 
     result = human_in_loop.wait_for_human_login(
-        page, is_logged_in, "JOB1", 0, "RDS01", TABLES, "Jupiter", {},
+        page, is_logged_in, "JOB1", 0, "RDS01", 3, TABLES, "Jupiter", {},
     )
 
     assert result is False
@@ -185,7 +276,7 @@ def test_is_logged_in_exception_still_clears_wait_and_propagates(
 
     try:
         human_in_loop.wait_for_human_login(
-            page, is_logged_in, "JOB1", 600, "RDS01", TABLES, "Jupiter", {},
+            page, is_logged_in, "JOB1", 600, "RDS01", 3, TABLES, "Jupiter", {},
         )
         raised = False
     except RuntimeError:

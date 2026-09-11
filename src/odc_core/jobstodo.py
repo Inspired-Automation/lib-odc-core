@@ -129,13 +129,23 @@ _CLEAR_PROCESS_ID = "UPDATE {jobs} SET process_id = NULL WHERE id = ?"
 #: one; rdp_username/rdp_password were dropped from ODC_jobs entirely on
 #: both Titan_INSE_DEV and the live Titan_INSE (2026-09-10) rather than
 #: just left unused, since nothing was ever going to populate them again.
+#:
+#: 0.8.9: a new rdp_sessionID column (INT) holds the run node's own
+#: Windows session id. The toolkit builds a job's VNC join URL as
+#: `5900 + session_id`, since a single rdp_host can run more than one
+#: session at once and has no other way to tell which one this bot's
+#: browser is actually in - see human_in_loop.get_current_session_id().
+#: (Briefly added by re-adding and repurposing the dropped rdp_username
+#: column under its old name, then renamed to rdp_sessionID the same day
+#: once that mismatch was flagged - no legacy callers to break, since
+#: nothing had been released yet.)
 HUMAN_WAIT_PENDING = "PENDING_HUMAN"
 HUMAN_WAIT_COMPLETE = "COMPLETE"
 
 _SET_HUMAN_WAIT = (
     "UPDATE {jobs} SET human_wait_status = ?, "
     "human_wait_deadline = DATEADD(SECOND, ?, SYSUTCDATETIME()), "
-    "rdp_host = ? "
+    "rdp_host = ?, rdp_sessionID = ? "
     "WHERE id = ?"
 )
 
@@ -144,7 +154,7 @@ _SET_HUMAN_WAIT_COMPLETE = "UPDATE {jobs} SET human_wait_status = ? WHERE id = ?
 _CLEAR_HUMAN_WAIT = (
     "UPDATE {jobs} SET human_wait_status = NULL, "
     "human_wait_deadline = NULL, "
-    "rdp_host = NULL "
+    "rdp_host = NULL, rdp_sessionID = NULL "
     "WHERE id = ?"
 )
 
@@ -314,6 +324,7 @@ def set_human_wait(
     job_id: str,
     timeout_s: int,
     rdp_host: str,
+    session_id: int,
     tables: dict,
     dsn: str,
 ) -> None:
@@ -330,8 +341,14 @@ def set_human_wait(
     session behind the login view - the human-assisted flow cannot connect
     without it. (0.8.8: this mechanism reverted from RDP back to VNC, which
     needs no login - the rdp_username/rdp_password columns this used to
-    also write are gone from ODC_jobs entirely, dropped via DDL on both
+    also write were dropped from ODC_jobs entirely, via DDL on both
     Titan_INSE_DEV and the live Titan_INSE, rather than just left unused.)
+
+    session_id (0.8.9) is the run node's own Windows session id, written to
+    the rdp_sessionID column (INT) - the toolkit needs it to build the
+    job's VNC join URL as `5900 + session_id`, since a single rdp_host can
+    run more than one session at once. See
+    human_in_loop.get_current_session_id().
 
     Call set_human_wait_complete() once the caller's own wait loop confirms
     the human has finished logging in (that detection - e.g. an in-page
@@ -345,11 +362,12 @@ def set_human_wait(
 
     def work(conn) -> None:
         cursor = conn.cursor()
-        cursor.execute(sql, HUMAN_WAIT_PENDING, timeout_s, rdp_host, job_id)
+        cursor.execute(sql, HUMAN_WAIT_PENDING, timeout_s, rdp_host, session_id, job_id)
         conn.commit()
         logger.debug(
-            "JOBSTODO - set human_wait_status=PENDING for job %s (timeout %ss, rdp_host=%s)",
-            job_id, timeout_s, rdp_host,
+            "JOBSTODO - set human_wait_status=PENDING for job %s (timeout %ss, "
+            "rdp_host=%s, session_id=%s)",
+            job_id, timeout_s, rdp_host, session_id,
         )
 
     db.run(dsn, work, description=f"jobstodo.set_human_wait({job_id})")
@@ -359,11 +377,11 @@ def set_human_wait_complete(job_id: str, tables: dict, dsn: str) -> None:
     """Mark a human-assisted login as finished - a persistent terminal state.
 
     Sets human_wait_status to HUMAN_WAIT_COMPLETE and touches nothing else
-    (0.8.5) - rdp_host and human_wait_deadline are left exactly as
-    set_human_wait() wrote them, deliberately, so a poller or an audit trail
-    can see which machine a completed job used. The status change to
-    COMPLETE is itself the cue for a poller's toolkit to disconnect the VNC
-    session.
+    (0.8.5) - rdp_host, rdp_sessionID (0.8.9), and human_wait_deadline are
+    left exactly as set_human_wait() wrote them, deliberately, so a poller
+    or an audit trail can see which machine and session a completed job
+    used. The status change to COMPLETE is itself the cue for a poller's
+    toolkit to disconnect the VNC session.
     Distinct from clear_human_wait(): this leaves human_wait_status itself
     non-NULL (COMPLETE, not cleared) so a poller can tell "just finished, go
     disconnect" apart from "nothing happening here."
@@ -398,9 +416,9 @@ def clear_human_wait(job_id: str, tables: dict, dsn: str) -> None:
     Call this on a failure or timeout exit from a human-assisted wait - one
     where set_human_wait_complete() was never reached, so the row is still
     at HUMAN_WAIT_PENDING - so a poller stops treating the job as waiting,
-    any provisioned session is torn down promptly, and the rdp_host field
-    does not sit in the database once the machine is no longer in use for
-    this job.
+    any provisioned session is torn down promptly, and the rdp_host/
+    rdp_sessionID fields do not sit in the database once the machine is no
+    longer in use for this job.
 
     Do NOT call this automatically right after a successful
     set_human_wait_complete() - see that function's docstring for why

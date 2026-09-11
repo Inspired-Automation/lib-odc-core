@@ -60,13 +60,29 @@ for detail in job_details:
   reCAPTCHA challenge". On success, `human_wait_status` is left at
   `COMPLETE` (a persistent terminal state, not auto-cleared). Generalised
   out of `automation-odc-energia`'s
-  Phase 3. Also exports `get_current_hostname()` (`socket.gethostname()`) for
-  building `wait_for_human_login()`'s `rdp_host` argument from this run
-  node's own identity rather than static, driftable config. This mechanism
-  connects over VNC, which needs only a host - 0.8.8 removed
-  `get_current_windows_username()`/`get_rdp_password()` and the
-  `rdp_username`/`rdp_password` arguments they built, added in 0.8.1-0.8.7
-  when this was briefly built around RDP instead.
+  Phase 3. Also exports `get_current_hostname()` (`socket.gethostname()`)
+  and `get_current_session_id()` (0.8.9, a single `ctypes` call to
+  `kernel32.ProcessIdToSessionId()`) for building `wait_for_human_login()`'s
+  `rdp_host`/`session_id` arguments from this run node's own identity rather
+  than static, driftable config - the toolkit needs both to build a job's
+  VNC join URL as `5900 + session_id`, since one machine can run more than
+  one session. This mechanism connects over VNC, which needs no username/
+  password - 0.8.8 removed `get_current_windows_username()`/
+  `get_rdp_password()` and the `rdp_username`/`rdp_password` arguments they
+  built, added in 0.8.1-0.8.7 when this was briefly built around RDP
+  instead. 0.8.9 then added a new `rdp_sessionID` column to hold
+  `session_id`, rather than reusing either dropped column's name. Also
+  exports `start_vnc_server(session_id, timeout_s=10.0)` (0.8.9,
+  fire-and-forget `tvnserver -run`, then polls the session's own VNC port
+  until it accepts a connection or `timeout_s` elapses) - call this before
+  launching the browser for any `human_in_loop=1` supplier, so the VNC
+  session the toolkit connects to is confirmed up first. `prepare_vnc_session(human_in_loop_flag,
+  timeout_s=10.0)` (0.8.9) wraps the whole thing generically: pass it a job
+  row's `human_in_loop` value - `None` if falsy (nothing to prepare), or
+  `(rdp_host, session_id)` if truthy, having already resolved both and
+  started/confirmed the VNC server. One call any `human_in_loop=1` supplier
+  can use instead of hand-rolling the check-and-sequence itself; must run
+  before that supplier's own browser launch.
 - `file_allocation.py` - work out the target folder/filename for a downloaded
   invoice from `ODC_jobs`/`ODC_job_details` fields. For Inspired PLC, resolves
   the company folder name from SugarCRM via `sugar_client` and `sug_internal_id`

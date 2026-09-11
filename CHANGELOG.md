@@ -7,6 +7,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.8.9] - 2026-09-11
+### Added
+- `human_in_loop.get_current_session_id() -> int` - reads the run node's
+  own Windows session id via `kernel32.ProcessIdToSessionId()` (stdlib
+  `ctypes`, no new dependency). The toolkit needs this to build a job's VNC
+  join URL as `5900 + session_id`, since a single `rdp_host` can run more
+  than one session at once.
+- `ODC_jobs.rdp_sessionID` (`INT`), on both `Titan_INSE_DEV` and the live
+  `Titan_INSE`, holding this value.
+- `human_in_loop.start_vnc_server(session_id, timeout_s=10.0) -> bool` -
+  fire-and-forget launch of `tvnserver -run`, then polls
+  `127.0.0.1:5900 + session_id` every 0.5s until it accepts a connection or
+  `timeout_s` elapses (returns whether it did). Call this before launching
+  the browser for any `human_in_loop=1` supplier, so the VNC session the
+  toolkit's join URL points at is confirmed up, not just "probably
+  starting".
+- `human_in_loop.prepare_vnc_session(human_in_loop_flag, timeout_s=10.0) ->
+  tuple[str, int] | None` - the fully generic pre-browser-launch step for
+  any `human_in_loop=1` supplier: pass it a job row's `human_in_loop`
+  value, get back `None` (falsy - nothing to prepare) or `(rdp_host,
+  session_id)` (truthy - already resolved and the VNC server already
+  started/confirmed). Wraps `get_current_hostname()`/
+  `get_current_session_id()`/`start_vnc_server()` in one call, so a
+  supplier project no longer needs to hand-roll that sequence itself.
+### Changed
+- `jobstodo.set_human_wait(job_id, timeout_s, rdp_host, session_id, tables,
+  dsn)` - gained the required `session_id` parameter (breaking). Writes it
+  to `rdp_sessionID`; `clear_human_wait()` nulls it again on a
+  failure/timeout exit, matching `rdp_host`'s own lifecycle.
+- `human_in_loop.wait_for_human_login(page, is_logged_in, job_id,
+  timeout_s, rdp_host, session_id, tables, dsn, config,
+  started_message=...)` - matching signature change (breaking).
+
 ## [0.8.8] - 2026-09-10
 ### Changed
 - Reverted the human-assisted-login mechanism from RDP back to VNC

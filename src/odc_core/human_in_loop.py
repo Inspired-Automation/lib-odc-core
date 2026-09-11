@@ -15,8 +15,11 @@ lib-odc-core-spec.md §4.2/§4.3.
 
 from __future__ import annotations
 
+import ctypes
 import logging
+import os
 import socket
+import subprocess
 import time
 from collections.abc import Callable
 from typing import Any
@@ -46,6 +49,160 @@ def get_current_hostname() -> str:
     driftable config value) never depended on which transport it fed.
     """
     return socket.gethostname()
+
+
+def get_current_session_id() -> int:
+    """Return this run node's own Windows session id, for the `session_id`
+    argument (written to the `rdp_sessionID` column - see `jobstodo`'s
+    module-level comment).
+
+    The toolkit builds the VNC join URL for a job's RDS host from
+    `5900 + session_id`, since a single host can run multiple sessions - it
+    has no way to know which one this bot's browser is actually running in
+    unless the bot tells it. Reads it live from the OS via
+    `kernel32.ProcessIdToSessionId()` (this process's own pid), the same
+    reasoning as `get_current_hostname()`/the pre-0.8.8
+    `get_current_windows_username()`: a config value would just be one more
+    thing to keep in sync, and would drift the moment a run lands in a
+    different session across runs (which it can - session ids are assigned
+    per logon, not fixed per machine).
+
+    `ctypes` rather than `pywin32`/`win32ts.ProcessIdToSessionId()` - this
+    is a single stdlib call, not worth a new dependency for.
+
+    Raises `OSError` if the OS call itself fails (`ProcessIdToSessionId`
+    returns 0) - not expected on a real Windows run node, but this function
+    makes no attempt to guess a default if it happens.
+    """
+    session_id = ctypes.c_ulong()
+    pid = os.getpid()
+    if not ctypes.windll.kernel32.ProcessIdToSessionId(ctypes.c_ulong(pid), ctypes.byref(session_id)):
+        raise OSError(f"ProcessIdToSessionId failed for pid {pid}")
+    return session_id.value
+
+
+#: Base VNC port - the toolkit's own join-URL convention is 5900 + session_id,
+#: since a single machine can run more than one Windows session (and so more
+#: than one tvnserver instance) at once. See `jobstodo`'s module-level
+#: comment on `rdp_sessionID`.
+VNC_PORT_BASE = 5900
+
+#: Default budget for start_vnc_server()'s post-launch port poll.
+VNC_PORT_POLL_TIMEOUT_S = 10.0
+
+#: Seconds between port-open attempts while polling.
+VNC_PORT_POLL_INTERVAL_S = 0.5
+
+
+def start_vnc_server(session_id: int, timeout_s: float = VNC_PORT_POLL_TIMEOUT_S) -> bool:
+    """Launch the TightVNC server for this session (`tvnserver -run`), then
+    poll its VNC port until it actually accepts a connection or timeout_s
+    elapses.
+
+    Call this before launching the browser for a human_in_loop=1 supplier -
+    the toolkit's join URL (`rdp_host`/`rdp_sessionID`, see `jobstodo`'s
+    module-level comment) is useless if nothing is actually listening on
+    that session's VNC port (`VNC_PORT_BASE + session_id`) yet.
+
+    `-run` starts tvnserver attached to this interactive session (as
+    opposed to `-install`, which registers it as a machine-wide service) -
+    the right mode here, since a VNC server needs to run inside the same
+    desktop session as the browser it's meant to expose, and this bot
+    already assumes an interactive session for that same reason (see
+    `main.py`'s own launch-time log message).
+
+    Launching itself is fire-and-forget: `Popen`, not `run`, since
+    `tvnserver -run` is a long-lived process that keeps serving VNC
+    connections for the rest of this session - waiting for it to exit (what
+    `run()` does) would hang here indefinitely. What this function does
+    wait for, briefly, is the port actually coming up: `-run` returns
+    control to this process before tvnserver has necessarily finished
+    initialising and started listening, so polling closes that gap rather
+    than assuming the port is immediately ready the instant `Popen()`
+    returns.
+
+    Best-effort and non-fatal throughout, like every other infra-readiness
+    step in this flow (e.g. `browser_helpers`'s own screenshot/banner
+    failures, or a `set_human_wait()` DB write failing): a launch failure
+    (TightVNC not installed, `tvnserver` not resolvable) or a port that
+    never opens within timeout_s is logged, never raised, so the browser
+    launch still proceeds - the human-assisted wait will simply have no
+    VNC session for a human to join yet.
+
+    Returns True if the port was confirmed open within timeout_s, False
+    otherwise (launch failure, or the port simply never came up in time) -
+    a caller may use this to log more loudly, but should not treat False as
+    fatal.
+    """
+    port = VNC_PORT_BASE + session_id
+
+    try:
+        subprocess.Popen(["tvnserver", "-run"])
+    except Exception:
+        logger.exception(
+            "HUMAN_IN_LOOP - could not start tvnserver - continuing without it "
+            "(the human-assisted wait will have no VNC session to join)",
+        )
+        return False
+
+    logger.info(
+        "HUMAN_IN_LOOP - started tvnserver -run for this session, waiting up to "
+        "%ss for port %d to open",
+        timeout_s, port,
+    )
+    deadline = time.monotonic() + timeout_s
+    while time.monotonic() < deadline:
+        try:
+            with socket.create_connection(("127.0.0.1", port), timeout=VNC_PORT_POLL_INTERVAL_S):
+                logger.info("HUMAN_IN_LOOP - VNC port %d is open", port)
+                return True
+        except OSError:
+            time.sleep(VNC_PORT_POLL_INTERVAL_S)
+
+    logger.warning(
+        "HUMAN_IN_LOOP - VNC port %d did not open within %ss of starting tvnserver - "
+        "continuing without a confirmed VNC session",
+        port, timeout_s,
+    )
+    return False
+
+
+def prepare_vnc_session(
+    human_in_loop_flag: object,
+    timeout_s: float = VNC_PORT_POLL_TIMEOUT_S,
+) -> tuple[str, int] | None:
+    """Generic pre-browser-launch step for any human_in_loop=1 supplier -
+    the one call a supplier project needs instead of hand-rolling the
+    `human_in_loop` check and the `get_current_hostname()`/
+    `get_current_session_id()`/`start_vnc_server()` sequence itself.
+
+    `human_in_loop_flag` is the caller's job row's own `human_in_loop`
+    value (e.g. `row["human_in_loop"]`, from `jobstodo.get_job_details()` -
+    see that function's docstring and spec §4.3) - a nullable `tinyint` as
+    it comes out of `ODC_suppliers`, so this accepts anything truthy/falsy
+    rather than requiring a `bool` specifically.
+
+    Falsy: returns `None` immediately - this job's supplier doesn't need a
+    human-assisted session, so there's nothing to prepare.
+
+    Truthy: resolves this run node's own `rdp_host`/`session_id`
+    (`get_current_hostname()`/`get_current_session_id()`) and starts the
+    VNC server for this session (`start_vnc_server()`, which polls its own
+    port before returning), then returns `(rdp_host, session_id)` - hold
+    onto both and pass them to `wait_for_human_login()` later, once the
+    caller's own browser has actually launched.
+
+    **Must be called before launching the browser** - that ordering is the
+    entire point: the VNC session needs to be confirmed listening first,
+    not started in a race with (or after) the browser.
+    """
+    if not human_in_loop_flag:
+        return None
+
+    rdp_host = get_current_hostname()
+    session_id = get_current_session_id()
+    start_vnc_server(session_id, timeout_s=timeout_s)
+    return rdp_host, session_id
 
 
 #: Seconds between poll ticks while waiting for the human.
@@ -289,6 +446,7 @@ def wait_for_human_login(
     job_id: str,
     timeout_s: int,
     rdp_host: str,
+    session_id: int,
     tables: dict,
     dsn: str,
     config: dict,
@@ -314,10 +472,16 @@ def wait_for_human_login(
     back to VNC, which needs only `rdp_host` to connect. See `jobstodo`'s
     module-level comment and the 0.8.8 Change Log entry for why.
 
+    0.8.9: added `session_id` - the toolkit builds a job's VNC join URL as
+    `5900 + session_id`, since a single `rdp_host` can run more than one
+    Windows session at once and has no other way to tell which one this
+    bot's browser is actually in. See `human_in_loop.get_current_session_id()`
+    and `jobstodo`'s module-level comment for where this is stored.
+
     Sequence:
       1. jobstodo.set_human_wait() - writes human_wait_status=PENDING_HUMAN
-         plus the VNC host, the cue for a poller's toolkit to open the VNC
-         session.
+         plus the VNC host and session id, the cue for a poller's toolkit
+         to open the VNC session.
       2. Injects the "I'm logged in - continue automation" button and the
          on-page banner, then polls every POLL_INTERVAL_S (up to timeout_s)
          until the button is clicked - the sole trigger for success. See
@@ -326,13 +490,13 @@ def wait_for_human_login(
       3. On success: shows a "taking over" banner, clears the confirm
          button, calls jobstodo.set_human_wait_complete() (writes
          human_wait_status=COMPLETE - the cue for the toolkit to disconnect
-         - and touches nothing else: rdp_host is left exactly as
-         set_human_wait() wrote it), then sleeps TAKEOVER_PAUSE_S before
+         - and touches nothing else: rdp_host/session_id are left exactly as
+         set_human_wait() wrote them), then sleeps TAKEOVER_PAUSE_S before
          returning True, giving the human a moment to read the banner and
          stop interacting. jobstodo.clear_human_wait() is deliberately NOT
          called on this path (see step 4), so a poller can observe COMPLETE
-         - and the VNC host a completed job used - for as long as it needs
-         rather than racing a fixed window.
+         - and the VNC host/session a completed job used - for as long as
+         it needs rather than racing a fixed window.
       4. jobstodo.clear_human_wait() runs in a finally, but only fires when
          `success` is False - a genuine failure, a timeout, or an exception
          raised from `is_logged_in()`/the poll loop. Those paths have
@@ -363,7 +527,7 @@ def wait_for_human_login(
     lib-odc-core-spec.md §4.2.
     """
     try:
-        jobstodo.set_human_wait(job_id, timeout_s, rdp_host, tables, dsn)
+        jobstodo.set_human_wait(job_id, timeout_s, rdp_host, session_id, tables, dsn)
     except Exception:
         logger.exception(
             "HUMAN_IN_LOOP - could not set human_wait_status for job %s; continuing "

@@ -141,7 +141,7 @@ get_job_details(process_id: str, job_id: str, tables: dict, dsn: str) -> list[di
 get_multi_credentials(client_id: str, supplier_id: str, tables: dict, dsn: str) -> list[dict]
 revert_to_pending(job_detail_id: str, tables: dict, dsn: str) -> None
 clear_job_claim(job_id: str, tables: dict, dsn: str) -> None
-set_human_wait(job_id: str, timeout_s: int, rdp_host: str, tables: dict, dsn: str) -> None
+set_human_wait(job_id: str, timeout_s: int, rdp_host: str, session_id: int, tables: dict, dsn: str) -> None
 set_human_wait_complete(job_id: str, tables: dict, dsn: str) -> None
 clear_human_wait(job_id: str, tables: dict, dsn: str) -> None
 ```
@@ -183,9 +183,12 @@ never drift apart. It also writes the machine (`rdp_host`) the poller's
 toolkit needs to open the VNC session behind the login view - the
 human-assisted flow the signal exists for cannot connect without it, so
 this is a required, not optional, argument. `rdp_username`/`rdp_password`
-no longer exist on `ODC_jobs` at all (0.8.8 dropped both columns via DDL,
-on both `Titan_INSE_DEV` and the live `Titan_INSE`) - see the naming note
-in §4.2.
+no longer exist on `ODC_jobs` at all (0.8.8 dropped both via DDL, on both
+`Titan_INSE_DEV` and the live `Titan_INSE`). `session_id` - the run node's
+own Windows session id - is also a required argument (0.8.9), written to a
+new `rdp_sessionID` column, since the toolkit needs it to build the job's
+VNC join URL as `5900 + session_id` (a single `rdp_host` can run more than
+one session). See the naming note in §4.2.
 
 Detecting that the human has actually finished logging in is the caller's
 own concern, not this library's - e.g. an in-page confirm button or a
@@ -228,6 +231,7 @@ wait_for_human_login(
     job_id: str,
     timeout_s: int,
     rdp_host: str,
+    session_id: int,
     tables: dict,
     dsn: str,
     config: dict,
@@ -235,6 +239,9 @@ wait_for_human_login(
 ) -> bool
 
 get_current_hostname() -> str
+get_current_session_id() -> int
+start_vnc_server(session_id: int, timeout_s: float = VNC_PORT_POLL_TIMEOUT_S) -> bool
+prepare_vnc_session(human_in_loop_flag: object, timeout_s: float = VNC_PORT_POLL_TIMEOUT_S) -> tuple[str, int] | None
 ```
 
 `started_message` (0.8.4, trailing/defaulted - existing positional call
@@ -264,6 +271,55 @@ built around RDP, which needs a username and password to connect, before it
 turned out the actual toolkit connects over VNC, which needs only a host.
 See §4.2's naming note and the 0.8.8 Change Log entry in `CLAUDE.md`.
 
+`get_current_session_id()` (0.8.9) builds the `session_id` argument above
+from this run node's own Windows session id, read via a single `ctypes`
+call to `kernel32.ProcessIdToSessionId()` on this process's own pid - no
+new dependency (`pywin32`/`win32ts` would have been one for a single call).
+The toolkit needs this to build a job's VNC join URL as
+`5900 + session_id`: `rdp_host` alone isn't enough once a single machine
+can run more than one session at a time. Written to the new
+`rdp_sessionID` column (`INT`) - see §4.2's naming note.
+
+`start_vnc_server(session_id, timeout_s=VNC_PORT_POLL_TIMEOUT_S)` (0.8.9) -
+the actual VNC session the `rdp_host`/`rdp_sessionID` signal points a
+poller's toolkit at. Launching itself is fire-and-forget: `tvnserver -run`
+via `subprocess.Popen`, not `run` - the server is a long-lived process, not
+something to wait for. `-run` returns control before tvnserver has
+necessarily finished starting, though, so this function then polls
+`127.0.0.1:VNC_PORT_BASE + session_id` (`VNC_PORT_BASE = 5900`, matching the
+toolkit's own join-URL convention) every `VNC_PORT_POLL_INTERVAL_S` (0.5s)
+until it accepts a connection or `timeout_s` (default `VNC_PORT_POLL_TIMEOUT_S`,
+10s) elapses, so a caller knows the session is actually reachable rather
+than merely "probably starting up". A caller should invoke this for any
+`human_in_loop=1` supplier, before launching the browser, so the server is
+confirmed listening by the time a human needs to join. Logs and swallows a
+launch failure (e.g. TightVNC not installed, or `tvnserver` not resolvable)
+or a port that never opens in time, rather than raising - matches every
+other infra-readiness step in this flow (the `ODC_jobs` signal writes are
+equally best-effort): the browser-side wait still proceeds either way,
+just with no confirmed VNC session for a human to actually reach. Returns
+`True` if the port was confirmed open within `timeout_s`, `False`
+otherwise - informational for a caller that wants to log more loudly, not
+something to treat as fatal.
+
+`prepare_vnc_session(human_in_loop_flag, timeout_s=VNC_PORT_POLL_TIMEOUT_S)`
+(0.8.9) is the single, fully generic pre-browser-launch step for **any**
+`human_in_loop=1` supplier - the one call a caller needs instead of
+hand-rolling the `human_in_loop` check plus the `get_current_hostname()`/
+`get_current_session_id()`/`start_vnc_server()` sequence itself.
+`human_in_loop_flag` is the caller's own job row's `human_in_loop` value
+(e.g. `row["human_in_loop"]` from `jobstodo.get_job_details()` - §3.2/§4.3)
+- a nullable `tinyint` as it comes out of `ODC_suppliers`, so this accepts
+anything truthy/falsy, not strictly a `bool`. Falsy: returns `None`
+immediately, nothing to prepare. Truthy: resolves `rdp_host`/`session_id`
+and starts (and confirms) the VNC server exactly as `start_vnc_server()`
+does, then returns `(rdp_host, session_id)` for the caller to hold onto
+and pass to `wait_for_human_login()` later, once its own browser has
+actually launched. **Must be called before that browser launch** - the
+whole reason this exists as a distinct, earlier call rather than folded
+into `wait_for_human_login()` itself, which only runs once `page` already
+exists.
+
 Added 0.8.1, generalised out of `automation-odc-energia`'s Phase 3 (see
 `docs/energia-human-assisted-login-control-room-contract.md` in that repo,
 which predates this generalisation and still describes a bespoke,
@@ -287,7 +343,7 @@ an exception it raises propagates out of `wait_for_human_login()` itself
 
 What it does, end to end:
 
-1. `jobstodo.set_human_wait(job_id, timeout_s, rdp_host, tables, dsn)`.
+1. `jobstodo.set_human_wait(job_id, timeout_s, rdp_host, session_id, tables, dsn)`.
 2. Injects a fixed "I'm logged in - continue automation" button (a DOM
    attribute - `element.dataset.confirmed` - read back via `page.evaluate()`
    each tick; not `page.expose_function()`, and not a `window.*` global -
@@ -534,7 +590,7 @@ callers that mutate data commit explicitly inside their `work(conn)` callable.
 
 | Object | Used by | Purpose |
 |--------|---------|---------|
-| `ODC_jobs` | `jobstodo`, `duplicate_check` | One row per supplier job. `process_id` is the claim marker; `human_wait_status`/`human_wait_deadline` (0.8.0) plus `rdp_host` (0.8.1) are the job-level human-assisted-login signal and its VNC connection details - see §4.2. `rdp_username`/`rdp_password` (also 0.8.1) were dropped entirely in 0.8.8 (naming/history in §4.2). |
+| `ODC_jobs` | `jobstodo`, `duplicate_check` | One row per supplier job. `process_id` is the claim marker; `human_wait_status`/`human_wait_deadline` (0.8.0) plus `rdp_host` (0.8.1) and `rdp_sessionID` (0.8.9) are the job-level human-assisted-login signal and its VNC connection details (host + session id) - see §4.2. `rdp_username`/`rdp_password` (also 0.8.1) were dropped entirely in 0.8.8 (naming/history in §4.2). |
 | `ODC_job_details` | `jobstodo`, `duplicate_check`, `updatejobdetails` | One row per account to collect. Carries `status`. |
 | `ODC_scrape_data` | `file_save_as`, `duplicate_check` | One row per downloaded document. |
 | `ODC_scrape_accounts` | `jobstodo`, `duplicate_check` | Inspired PLC account pool; also the source of `sug_internal_id` for every client via `jobstodo.get_job_details()`. |
@@ -560,7 +616,7 @@ IN PROGRESS, FOUND, REQUIRES RETRY, MISSING PARENT
 for sub-1 KB downloads. `pending` (lowercase) is the pre-run state of a
 `job_details` row and is not part of the vocabulary above.
 
-### 4.2 Human-wait signal (added 0.8.0; RDP fields and the PENDING/COMPLETE lifecycle added 0.8.1, reverted to VNC/host-only in 0.8.8)
+### 4.2 Human-wait signal (added 0.8.0; RDP fields and the PENDING/COMPLETE lifecycle added 0.8.1, reverted to VNC/host-only in 0.8.8, session id added 0.8.9)
 
 A separate, job-level signal on `ODC_jobs`, distinct from §4.1's per-account
 vocabulary. Written only by `jobstodo.set_human_wait()`/
@@ -578,10 +634,11 @@ the DDL below: the applied `human_wait_status` is `VARCHAR(50)`, not
 ALTER TABLE dbo.ODC_jobs ADD
     human_wait_status   NVARCHAR(30)  NULL,   -- NULL = not waiting (or a failure/timeout exit); 'PENDING_HUMAN' = waiting; 'COMPLETE' = human finished (persists - not auto-cleared)
     human_wait_deadline DATETIME2     NULL,   -- UTC, set when the wait begins = SYSUTCDATETIME() + timeout_s
-    rdp_host             NVARCHAR(255) NULL;   -- machine hostname/IP for the human-assisted VNC session (see naming note below)
+    rdp_host             NVARCHAR(255) NULL,   -- machine hostname/IP for the human-assisted VNC session (see naming note below)
+    rdp_sessionID        INT           NULL;   -- run node's own Windows session id
 ```
 
-**Naming note (0.8.8):** this mechanism was briefly (0.8.1-0.8.7) built
+**Naming note (0.8.8/0.8.9):** this mechanism was briefly (0.8.1-0.8.7) built
 around RDP, adding `rdp_username`/`rdp_password` columns alongside
 `rdp_host` to connect. It reverted to VNC once it turned out that's the
 actual toolkit transport, which needs only a host - `rdp_username`/
@@ -591,17 +648,31 @@ live `Titan_INSE` - confirmed via `INFORMATION_SCHEMA.COLUMNS` immediately
 after), since nothing was ever going to populate them again. `rdp_host`
 itself keeps its name despite now carrying a VNC host rather than an RDP
 one - renaming it would need its own separate DDL coordination for no
-functional benefit, so it wasn't requested. This is the same kind of
-documented drift as `human_wait_status` being `VARCHAR(50)` instead of
-`NVARCHAR(30)` above - noted here rather than fixed via a schema change.
+functional benefit, so it wasn't requested.
+
+One day later (0.8.9), a new `rdp_sessionID` column (`INT`) was added for
+the run node's own Windows session id - the toolkit needs this to build a
+job's VNC join URL as `5900 + session_id`, since a single `rdp_host` can
+run more than one session at once. The first attempt at this reused the
+just-dropped `rdp_username` column name (repurposing it to hold an integer
+session id instead of a username) to keep the DDL footprint small, matching
+how `rdp_host` was handled - but unlike `rdp_host` ("still basically a
+host"), a username-shaped column silently becoming a session-id integer was
+judged too confusing a mismatch to keep, so it was renamed to
+`rdp_sessionID` via `sp_rename` on both databases before anything shipped -
+no legacy caller ever depended on the old name. `rdp_host`'s own naming
+drift (VNC host, RDP-shaped name) remains the same kind of documented
+choice as `human_wait_status` being `VARCHAR(50)` instead of `NVARCHAR(30)`
+above.
 
 `human_wait_status` lifecycle - `NULL` -> `PENDING_HUMAN` -> `COMPLETE`
 (terminal) on success, or `NULL` directly on a failure/timeout exit
 (`COMPLETE` never written on that path):
 
 1. **`set_human_wait()`** writes `human_wait_status = 'PENDING_HUMAN'`
-   (`jobstodo.HUMAN_WAIT_PENDING`), `human_wait_deadline`, and `rdp_host` -
-   the cue for a poller's toolkit to open the VNC session and connect.
+   (`jobstodo.HUMAN_WAIT_PENDING`), `human_wait_deadline`, `rdp_host`, and
+   `rdp_sessionID` - the cue for a poller's toolkit to open the VNC session
+   and connect.
 2. The caller's own wait loop - not this library - detects the human has
    actually finished logging in (e.g. `automation-odc-energia`'s
    `wait_for_human_login()` polls an in-page "I'm logged in" button and a
@@ -609,14 +680,14 @@ documented drift as `human_wait_status` being `VARCHAR(50)` instead of
    never reads `ODC_jobs` for this).
 3. On confirmed success, **`set_human_wait_complete()`** writes
    `human_wait_status = 'COMPLETE'` (`jobstodo.HUMAN_WAIT_COMPLETE`) and
-   touches nothing else (0.8.5) - `rdp_host` and `human_wait_deadline` are
-   left exactly as `set_human_wait()` wrote them. The status change to
-   `COMPLETE` is itself the cue for the toolkit to disconnect the VNC
-   session. `COMPLETE` is a **persistent terminal state** (0.8.4): the
-   caller must not also call `clear_human_wait()` right after this, since a
-   poller needs to be able to observe `COMPLETE` without racing a fixed
-   time budget before it disappears.
-4. **`clear_human_wait()`** nulls all three remaining columns, including
+   touches nothing else (0.8.5) - `rdp_host`/`rdp_sessionID` and
+   `human_wait_deadline` are left exactly as `set_human_wait()` wrote them.
+   The status change to `COMPLETE` is itself the cue for the toolkit to
+   disconnect the VNC session. `COMPLETE` is a **persistent terminal
+   state** (0.8.4): the caller must not also call `clear_human_wait()`
+   right after this, since a poller needs to be able to observe `COMPLETE`
+   without racing a fixed time budget before it disappears.
+4. **`clear_human_wait()`** nulls all four remaining columns, including
    `human_wait_status` itself, on a failure or timeout exit - one where
    step 3 was never reached, so the row is still at `PENDING_HUMAN`. There
    is nothing worth keeping on that path, so it resets straight to `NULL`
@@ -634,12 +705,15 @@ Column notes:
   cannot connect without it. Assigned per-job (the bot is handed a machine
   per run, not a fixed shared one), so it is written fresh by every
   `set_human_wait()` call rather than read from static config.
+- `rdp_sessionID`: the run node's own Windows session id (0.8.9), an `INT`.
+  Read live via `human_in_loop.get_current_session_id()`, for the same
+  "don't trust a static config value" reason as `rdp_host`.
 - `rdp_username` / `rdp_password`: dropped entirely in 0.8.8 - see the
   naming note above. Before that (0.8.1-0.8.7) these held the RDP
   login/password in plaintext, matching the existing portal-credential
   pattern in `ODC_credentials`/`ODC_job_details`; that plaintext-RDP-password
   concern no longer applies now that VNC needs no credential to store, and
-  there are no columns left to leak one from.
+  there is no column left to leak one from.
 - All three functions raise the underlying `pyodbc.Error` if these columns
   don't exist yet on the target database (this is an additive, opt-in
   schema change - see the DDL above); callers should treat that as "no

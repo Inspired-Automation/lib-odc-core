@@ -47,8 +47,16 @@ entry point of its own.
   `rdp_username`/`rdp_password` were dropped from `ODC_jobs` entirely via
   `ALTER TABLE ... DROP COLUMN` on both `Titan_INSE_DEV` and the live
   `Titan_INSE` (2026-09-10, confirmed via `INFORMATION_SCHEMA.COLUMNS`
-  immediately after) - so `ODC_jobs` now carries four of these columns, not
-  five.
+  immediately after) - so `ODC_jobs` briefly carried four of these columns,
+  not five.
+  **0.8.9** (2026-09-11): a new `rdp_sessionID` column (`INT`) holds the
+  run node's own Windows session id. The toolkit needs this to build a
+  job's VNC join URL as `5900 + session_id`, since a single `rdp_host` can
+  run more than one session at once. See spec §4.2 and
+  `human_in_loop.get_current_session_id()`. (Briefly added by re-adding and
+  repurposing the just-dropped `rdp_username` column under its old name,
+  then renamed to `rdp_sessionID` the same day once that mismatch was
+  flagged - nothing had been released yet, so no legacy caller to break.)
 - `ODC_suppliers` (pre-existing, not owned by this library) carries
   `human_in_loop` (nullable `tinyint`) - a **per-supplier**, not per-job,
   flag for "does this supplier's login require a human". Confirmed on both
@@ -246,6 +254,68 @@ entry point of its own.
   the same reason - never add another `window.*` global here.
 
 ## Change Log
+- 2026-09-11: v0.8.9 - added Windows session id to the human-wait signal, so
+  the toolkit can build a job's VNC join URL as `5900 + session_id` (a
+  single `rdp_host` can run more than one session at once, and the toolkit
+  had no way to tell which one this bot's browser was actually in).
+  - `human_in_loop.get_current_session_id() -> int` - reads the run node's
+    own session id via a single `ctypes` call to
+    `kernel32.ProcessIdToSessionId()` (this process's own pid) - stdlib
+    only, no new dependency (`pywin32`/`win32ts` would have been one).
+    Verified live on a dev machine: matched `qwinsta`'s own reported
+    session ID for the same shell.
+  - `jobstodo.set_human_wait(job_id, timeout_s, rdp_host, session_id, tables,
+    dsn)` - gained the new `session_id` parameter (breaking - inserted
+    before `tables`, not trailing/defaulted, matching how `rdp_host` itself
+    was added as a required argument rather than optional).
+  - `human_in_loop.wait_for_human_login(page, is_logged_in, job_id,
+    timeout_s, rdp_host, session_id, tables, dsn, config,
+    started_message=...)` - matching signature change.
+  - **Storage: a new `rdp_sessionID` column** (`INT`) on `ODC_jobs`, added
+    via `ALTER TABLE dbo.ODC_jobs ADD rdp_sessionID INT NULL` on both
+    `Titan_INSE_DEV` and the live `Titan_INSE`. First attempt (same day)
+    tried repurposing the just-dropped `rdp_username` column under its old
+    name - per the developer's initial suggestion - but that was corrected
+    to a properly-named column instead once the confusing mismatch (an
+    `INT` session id living in a column literally named `rdp_username`) was
+    flagged: renamed via `sp_rename` to `rdp_sessionID` on both databases
+    before anything was released, so no legacy caller needed to change.
+    See spec §4.2 and Databases above.
+  - `set_human_wait()` writes `session_id` to `rdp_sessionID` on every
+    call; `clear_human_wait()` nulls it again on a failure/timeout exit,
+    matching `rdp_host`'s own lifecycle exactly.
+  - Added `human_in_loop.start_vnc_server(session_id, timeout_s=10.0)` - a
+    fire-and-forget (`subprocess.Popen`, not `run` - `tvnserver -run` is
+    long-lived, waiting for it to exit would hang) launch of the actual
+    TightVNC server the `rdp_host`/`rdp_sessionID` signal points a poller's
+    toolkit at, **then polls `127.0.0.1:5900 + session_id` every 0.5s until
+    it accepts a connection or `timeout_s` elapses** - `-run` returns before
+    tvnserver has necessarily finished starting, so this closes the gap
+    between "process launched" and "port actually reachable" rather than
+    assuming the two happen at the same instant. Returns `True`/`False` for
+    whether the port was confirmed open. Any `human_in_loop=1` supplier
+    should call this before launching its browser, not after - the join URL
+    is useless if nothing is listening on that session's VNC port yet.
+    Logs and swallows both a launch failure and a poll timeout rather than
+    raising, matching this flow's existing tolerance for infra not being
+    ready (the `ODC_jobs` signal writes are equally best-effort).
+  - **Generalised the whole pre-browser-launch step into odc_core**, per
+    the developer's explicit ask ("I want both to be a generic logic
+    applied for all supplier so it is in the odc-core") - added
+    `human_in_loop.prepare_vnc_session(human_in_loop_flag, timeout_s=10.0)
+    -> tuple[str, int] | None`. Wraps the `human_in_loop` check plus the
+    `get_current_hostname()`/`get_current_session_id()`/`start_vnc_server()`
+    sequence in one call: pass it a job row's own `human_in_loop` value
+    (e.g. `row["human_in_loop"]`) - falsy returns `None` immediately
+    (nothing to prepare), truthy resolves `rdp_host`/`session_id` and starts
+    (and confirms) the VNC server, returning `(rdp_host, session_id)` for
+    the caller to hold onto and pass to `wait_for_human_login()` later. Any
+    `human_in_loop=1` supplier project gets this identically now, instead of
+    each one hand-rolling the same check-and-sequence itself - `main.py`'s
+    own version of this (added the same day, before this generalisation)
+    was the direct source. **Must be called before the browser launches** -
+    that's why this can't simply be folded into `wait_for_human_login()`
+    itself, which only runs once `page` already exists.
 - 2026-09-10: v0.8.8 - reverted the human-assisted-login mechanism from RDP
   back to VNC (host-only), undoing the `rdp_username`/`rdp_password`
   additions from 0.8.1-0.8.7. Traced from a live warning
@@ -527,6 +597,13 @@ entry point of its own.
   does not exist and made the documented `pip install` URLs 404).
 
 ## Outstanding TODOs
+- Cut a `v0.8.9` release with the built wheel attached, following
+  `RELEASING.md`. `automation-odc-energia` (the only current
+  `human_in_loop=1` consumer) needs to pin `v0.8.9` and update its own
+  `main.py`/`energia_supplier.py` call sites to pass `session_id` (via the
+  new `human_in_loop.get_current_session_id()`) before the VNC join URL the
+  toolkit builds actually has a session to target - tracked in that repo's
+  own CLAUDE.md, not here.
 - Confirm the root cause behind `human_wait_status` reading `NULL` for job
   145 (`Titan_INSE_DEV`, client `BoxFIsh`, supplier `Energia`) during live
   testing of v0.8.1 - `process_id` was set (987654) but every
