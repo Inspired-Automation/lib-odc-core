@@ -76,7 +76,12 @@ for detail in job_details:
   fire-and-forget `tvnserver -run`, then polls the session's own VNC port
   until it accepts a connection or `timeout_s` elapses) - call this before
   launching the browser for any `human_in_loop=1` supplier, so the VNC
-  session the toolkit connects to is confirmed up first. `prepare_vnc_session(human_in_loop_flag,
+  session the toolkit connects to is confirmed up first. The `tvnserver`
+  path itself is resolved (0.8.10) via env var override, then the Windows
+  "App Paths" registry key, then TightVNC's default install locations -
+  not a bare `"tvnserver"` string, which only resolves via `PATH` and
+  reliably failed on a real run node with TightVNC installed but not on
+  `PATH`. `prepare_vnc_session(human_in_loop_flag,
   timeout_s=10.0)` (0.8.9) wraps the whole thing generically: pass it a job
   row's `human_in_loop` value - `None` if falsy (nothing to prepare), or
   `(rdp_host, session_id)` if truthy, having already resolved both and

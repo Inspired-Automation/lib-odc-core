@@ -21,6 +21,7 @@ import os
 import socket
 import subprocess
 import time
+import winreg
 from collections.abc import Callable
 from typing import Any
 
@@ -93,6 +94,76 @@ VNC_PORT_POLL_TIMEOUT_S = 10.0
 #: Seconds between port-open attempts while polling.
 VNC_PORT_POLL_INTERVAL_S = 0.5
 
+#: App Paths registry key TightVNC's own installer registers - the same
+#: place Explorer/`start`/ShellExecute resolve a bare "tvnserver" from.
+#: `subprocess.Popen`, unlike those, does NOT consult this - it only
+#: searches the current directory and PATH (confirmed live: a run node
+#: with TightVNC installed still raised FileNotFoundError from a bare
+#: `Popen(["tvnserver", "-run"])`), so _resolve_tvnserver_path() below
+#: reads it directly instead of assuming PATH is enough.
+_TVNSERVER_APP_PATHS_KEY = r"SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths\tvnserver.exe"
+
+#: Default install locations TightVNC's own installer offers - tried only
+#: after the registry and env var lookups below come up empty.
+_TVNSERVER_DEFAULT_PATHS = (
+    r"C:\Program Files\TightVNC\tvnserver.exe",
+    r"C:\Program Files (x86)\TightVNC\tvnserver.exe",
+)
+
+
+def _resolve_tvnserver_path() -> str:
+    """Best-effort resolution of tvnserver.exe's actual location on this
+    run node.
+
+    A bare `"tvnserver"` only resolves via `subprocess`/`CreateProcess`'s
+    own search (cwd, then `PATH`) - it does not consult the Windows "App
+    Paths" registry key the way `ShellExecute`/`start`/Explorer would, and
+    TightVNC's installer does not add itself to `PATH`. This was found live
+    on a run node with TightVNC genuinely installed: `start_vnc_server()`
+    raised `FileNotFoundError` from exactly that bare-name `Popen()` call.
+
+    Tries, in order:
+      1. the `ODC_TVNSERVER_PATH` environment variable - an explicit
+         override for a non-standard install location, same pattern as
+         `ODC_RDP_PASSWORD`'s env-var precedent elsewhere in this module's
+         history (a secret/path scoped to one machine, not team-wide
+         config).
+      2. the same App Paths registry key (`_TVNSERVER_APP_PATHS_KEY`)
+         Explorer/`start` would use - the mechanism TightVNC's installer is
+         *documented* to register itself under.
+      3. `_TVNSERVER_DEFAULT_PATHS`, TightVNC's own default install
+         locations.
+
+    Step 3 is not just a defensive fallback for "the registry key is
+    missing for some reason": confirmed live on a real dev machine with
+    TightVNC genuinely installed that the App Paths key was simply absent
+    (`winreg.OpenKey()` raised `FileNotFoundError`) while the default
+    install path resolved it correctly - so this step is doing real, load-
+    bearing work, not covering a hypothetical edge case.
+
+    Falls back to the bare `"tvnserver"` string if none of these resolve
+    to a real file - `subprocess.Popen()` then raises `FileNotFoundError`
+    exactly as before this existed, so a genuinely-not-installed node's
+    behaviour is unchanged.
+    """
+    env_path = os.environ.get("ODC_TVNSERVER_PATH", "").strip()
+    if env_path and os.path.isfile(env_path):
+        return env_path
+
+    try:
+        with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, _TVNSERVER_APP_PATHS_KEY) as key:
+            registry_path, _ = winreg.QueryValueEx(key, "")
+        if registry_path and os.path.isfile(registry_path):
+            return registry_path
+    except OSError:
+        pass
+
+    for candidate in _TVNSERVER_DEFAULT_PATHS:
+        if os.path.isfile(candidate):
+            return candidate
+
+    return "tvnserver"
+
 
 def start_vnc_server(session_id: int, timeout_s: float = VNC_PORT_POLL_TIMEOUT_S) -> bool:
     """Launch the TightVNC server for this session (`tvnserver -run`), then
@@ -110,6 +181,14 @@ def start_vnc_server(session_id: int, timeout_s: float = VNC_PORT_POLL_TIMEOUT_S
     desktop session as the browser it's meant to expose, and this bot
     already assumes an interactive session for that same reason (see
     `main.py`'s own launch-time log message).
+
+    The executable itself is resolved via `_resolve_tvnserver_path()`, not
+    a bare `"tvnserver"` string - `subprocess.Popen()` only searches the
+    current directory and `PATH`, not the Windows "App Paths" registry key
+    TightVNC's installer actually registers itself under, which is why a
+    bare name reliably raised `FileNotFoundError` on a run node with
+    TightVNC genuinely installed (see that function's docstring for the
+    full resolution order).
 
     Launching itself is fire-and-forget: `Popen`, not `run`, since
     `tvnserver -run` is a long-lived process that keeps serving VNC
@@ -135,13 +214,16 @@ def start_vnc_server(session_id: int, timeout_s: float = VNC_PORT_POLL_TIMEOUT_S
     fatal.
     """
     port = VNC_PORT_BASE + session_id
+    tvnserver_path = _resolve_tvnserver_path()
 
     try:
-        subprocess.Popen(["tvnserver", "-run"])
+        subprocess.Popen([tvnserver_path, "-run"])
     except Exception:
         logger.exception(
-            "HUMAN_IN_LOOP - could not start tvnserver - continuing without it "
-            "(the human-assisted wait will have no VNC session to join)",
+            "HUMAN_IN_LOOP - could not start tvnserver (resolved path: %r) - "
+            "continuing without it (the human-assisted wait will have no VNC "
+            "session to join)",
+            tvnserver_path,
         )
         return False
 

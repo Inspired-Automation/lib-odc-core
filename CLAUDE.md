@@ -254,6 +254,23 @@ entry point of its own.
   the same reason - never add another `window.*` global here.
 
 ## Change Log
+- 2026-09-11: v0.8.10 - fixed `start_vnc_server()` raising `FileNotFoundError`
+  on a real run node (`svc.UATBotrunner01`) with TightVNC genuinely
+  installed: `subprocess.Popen(["tvnserver", "-run"])` only searches the
+  current directory and `PATH`, not the Windows "App Paths" registry key
+  an installer like TightVNC's actually registers itself under - so a bare
+  `"tvnserver"` string never had a real chance of resolving on that node.
+  Added `human_in_loop._resolve_tvnserver_path()`, tried in order: the new
+  `ODC_TVNSERVER_PATH` env var (an explicit override, mirroring
+  `ODC_RDP_PASSWORD`'s precedent for a machine-scoped value), the App Paths
+  registry key itself, then TightVNC's two default install locations
+  (`Program Files`/`Program Files (x86)`) - falling back to the original
+  bare `"tvnserver"` (and its `FileNotFoundError`) only if none of those
+  resolve to a real file. Confirmed live on a dev machine that the
+  registry step alone is not reliable even on a genuine install - TightVNC
+  was installed there too, but with no App Paths key at all, so the
+  default-path fallback is doing real work, not covering a hypothetical.
+  `start_vnc_server()` now calls this instead of hardcoding `"tvnserver"`.
 - 2026-09-11: v0.8.9 - added Windows session id to the human-wait signal, so
   the toolkit can build a job's VNC join URL as `5900 + session_id` (a
   single `rdp_host` can run more than one session at once, and the toolkit

@@ -282,10 +282,24 @@ can run more than one session at a time. Written to the new
 
 `start_vnc_server(session_id, timeout_s=VNC_PORT_POLL_TIMEOUT_S)` (0.8.9) -
 the actual VNC session the `rdp_host`/`rdp_sessionID` signal points a
-poller's toolkit at. Launching itself is fire-and-forget: `tvnserver -run`
-via `subprocess.Popen`, not `run` - the server is a long-lived process, not
-something to wait for. `-run` returns control before tvnserver has
-necessarily finished starting, though, so this function then polls
+poller's toolkit at. The executable path is resolved via
+`_resolve_tvnserver_path()` (0.8.10), not a bare `"tvnserver"` string -
+`subprocess.Popen()` only searches the current directory and `PATH`, not
+the Windows "App Paths" registry key an installer like TightVNC's actually
+registers itself under, so a bare name reliably raised `FileNotFoundError`
+on a run node with TightVNC genuinely installed. Resolution order: the
+`ODC_TVNSERVER_PATH` environment variable, then that App Paths registry
+key, then TightVNC's own default install locations (`C:\Program
+Files\TightVNC\tvnserver.exe` / the `(x86)` variant) - falling back to the
+bare `"tvnserver"` string (and thus the original `FileNotFoundError`
+behaviour) only if none of those resolve to a real file. Confirmed live
+that the registry step alone is not sufficient even on a genuine install:
+a real dev machine had TightVNC installed but no App Paths key at all, so
+the default-path fallback is load-bearing, not just defensive. Launching
+itself is fire-and-forget: `tvnserver -run` via `subprocess.Popen`, not
+`run` - the server is a long-lived process, not something to wait for.
+`-run` returns control before tvnserver has necessarily finished starting,
+though, so this function then polls
 `127.0.0.1:VNC_PORT_BASE + session_id` (`VNC_PORT_BASE = 5900`, matching the
 toolkit's own join-URL convention) every `VNC_PORT_POLL_INTERVAL_S` (0.5s)
 until it accepts a connection or `timeout_s` (default `VNC_PORT_POLL_TIMEOUT_S`,

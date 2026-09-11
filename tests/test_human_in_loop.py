@@ -55,37 +55,100 @@ def test_get_current_session_id_raises_on_failure(monkeypatch):
     assert raised is True
 
 
+@patch("odc_core.human_in_loop._resolve_tvnserver_path", return_value=r"C:\TightVNC\tvnserver.exe")
 @patch("odc_core.human_in_loop.socket.create_connection")
 @patch("odc_core.human_in_loop.subprocess.Popen")
-def test_start_vnc_server_launches_and_confirms_port_open(mock_popen, mock_create_connection):
+def test_start_vnc_server_launches_and_confirms_port_open(
+    mock_popen, mock_create_connection, mock_resolve_path,
+):
     result = human_in_loop.start_vnc_server(3)
 
     assert result is True
-    mock_popen.assert_called_once_with(["tvnserver", "-run"])
+    mock_popen.assert_called_once_with([r"C:\TightVNC\tvnserver.exe", "-run"])
     mock_create_connection.assert_called_once_with(
         ("127.0.0.1", human_in_loop.VNC_PORT_BASE + 3),
         timeout=human_in_loop.VNC_PORT_POLL_INTERVAL_S,
     )
 
 
+@patch("odc_core.human_in_loop._resolve_tvnserver_path", return_value="tvnserver")
 @patch("odc_core.human_in_loop.subprocess.Popen", side_effect=FileNotFoundError("no tvnserver"))
-def test_start_vnc_server_swallows_launch_failure(mock_popen):
+def test_start_vnc_server_swallows_launch_failure(mock_popen, mock_resolve_path):
     result = human_in_loop.start_vnc_server(3)  # must not raise
 
     assert result is False
     mock_popen.assert_called_once()
 
 
+@patch("odc_core.human_in_loop._resolve_tvnserver_path", return_value="tvnserver")
 @patch("odc_core.human_in_loop.time.sleep")
 @patch("odc_core.human_in_loop.socket.create_connection", side_effect=OSError("refused"))
 @patch("odc_core.human_in_loop.subprocess.Popen")
 def test_start_vnc_server_times_out_when_port_never_opens(
-    mock_popen, mock_create_connection, mock_sleep,
+    mock_popen, mock_create_connection, mock_sleep, mock_resolve_path,
 ):
     result = human_in_loop.start_vnc_server(3, timeout_s=0.01)
 
     assert result is False
     mock_create_connection.assert_called()
+
+
+def test_resolve_tvnserver_path_prefers_env_var_override(monkeypatch, tmp_path):
+    fake_exe = tmp_path / "tvnserver.exe"
+    fake_exe.write_text("")
+    monkeypatch.setenv("ODC_TVNSERVER_PATH", str(fake_exe))
+
+    assert human_in_loop._resolve_tvnserver_path() == str(fake_exe)
+
+
+def test_resolve_tvnserver_path_falls_back_to_registry(monkeypatch, tmp_path):
+    monkeypatch.delenv("ODC_TVNSERVER_PATH", raising=False)
+    fake_exe = tmp_path / "tvnserver.exe"
+    fake_exe.write_text("")
+
+    class _FakeKey:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc_info):
+            return False
+
+    monkeypatch.setattr(
+        human_in_loop.winreg, "OpenKey", lambda *a, **kw: _FakeKey(), raising=False,
+    )
+    monkeypatch.setattr(
+        human_in_loop.winreg, "QueryValueEx", lambda key, name: (str(fake_exe), 1), raising=False,
+    )
+
+    assert human_in_loop._resolve_tvnserver_path() == str(fake_exe)
+
+
+def test_resolve_tvnserver_path_falls_back_to_default_locations(monkeypatch, tmp_path):
+    monkeypatch.delenv("ODC_TVNSERVER_PATH", raising=False)
+    monkeypatch.setattr(
+        human_in_loop.winreg,
+        "OpenKey",
+        MagicMock(side_effect=OSError("key not found")),
+        raising=False,
+    )
+    fake_exe = tmp_path / "tvnserver.exe"
+    fake_exe.write_text("")
+    monkeypatch.setattr(human_in_loop, "_TVNSERVER_DEFAULT_PATHS", (str(fake_exe),))
+
+    assert human_in_loop._resolve_tvnserver_path() == str(fake_exe)
+
+
+def test_resolve_tvnserver_path_falls_back_to_bare_name_when_nothing_found(monkeypatch):
+    monkeypatch.delenv("ODC_TVNSERVER_PATH", raising=False)
+    monkeypatch.setattr(
+        human_in_loop.winreg,
+        "OpenKey",
+        MagicMock(side_effect=OSError("key not found")),
+        raising=False,
+    )
+    monkeypatch.setattr(human_in_loop, "_TVNSERVER_DEFAULT_PATHS", ())
+
+    assert human_in_loop._resolve_tvnserver_path() == "tvnserver"
 
 
 @patch("odc_core.human_in_loop.start_vnc_server")

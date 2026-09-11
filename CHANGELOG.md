@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.8.10] - 2026-09-11
+### Fixed
+- `start_vnc_server()` raising `FileNotFoundError` on a real run node with
+  TightVNC installed - a bare `"tvnserver"` string only resolves via
+  `subprocess`'s own `PATH` search, not the Windows "App Paths" registry
+  key TightVNC's installer actually registers itself under. Added
+  `human_in_loop._resolve_tvnserver_path()`: tries the new
+  `ODC_TVNSERVER_PATH` environment variable, then that registry key, then
+  TightVNC's default install locations, before falling back to the
+  original bare `"tvnserver"` string.
+
 ## [0.8.9] - 2026-09-11
 ### Added
 - `human_in_loop.get_current_session_id() -> int` - reads the run node's
