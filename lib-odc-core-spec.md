@@ -295,11 +295,26 @@ bare `"tvnserver"` string (and thus the original `FileNotFoundError`
 behaviour) only if none of those resolve to a real file. Confirmed live
 that the registry step alone is not sufficient even on a genuine install:
 a real dev machine had TightVNC installed but no App Paths key at all, so
-the default-path fallback is load-bearing, not just defensive. Launching
-itself is fire-and-forget: `tvnserver -run` via `subprocess.Popen`, not
-`run` - the server is a long-lived process, not something to wait for.
-`-run` returns control before tvnserver has necessarily finished starting,
-though, so this function then polls
+the default-path fallback is load-bearing, not just defensive.
+
+Before launching, also configures the actual VNC port (0.8.11):
+`_set_tvnserver_port(port)` writes `RfbPort` (a `REG_DWORD`) under
+`HKCU\Software\TightVNC\Server`, and `_stop_existing_tvnserver()` stops any
+already-running `tvnserver.exe` for this session first. Both are
+necessary, not defensive extras - confirmed live, with real (unmocked)
+calls on a real dev machine: with no `RfbPort` set, `-run` always listened
+on the plain default port (5900) regardless of session, so a poll of
+`VNC_PORT_BASE + session_id` reliably timed out; and a second `-run` while
+an instance is already active does not pick up a freshly-written port on
+its own, it's simply a no-op, so a stale instance has to be stopped first
+for a new port setting to actually take effect. `taskkill` here can only
+ever affect processes this same account owns - Windows itself prevents a
+standard user process reaching across accounts/sessions on a shared host.
+
+Launching itself is fire-and-forget: `tvnserver -run` via
+`subprocess.Popen`, not `run` - the server is a long-lived process, not
+something to wait for. `-run` returns control before tvnserver has
+necessarily finished starting, though, so this function then polls
 `127.0.0.1:VNC_PORT_BASE + session_id` (`VNC_PORT_BASE = 5900`, matching the
 toolkit's own join-URL convention) every `VNC_PORT_POLL_INTERVAL_S` (0.5s)
 until it accepts a connection or `timeout_s` (default `VNC_PORT_POLL_TIMEOUT_S`,

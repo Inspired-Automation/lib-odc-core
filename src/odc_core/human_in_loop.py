@@ -110,6 +110,71 @@ _TVNSERVER_DEFAULT_PATHS = (
     r"C:\Program Files (x86)\TightVNC\tvnserver.exe",
 )
 
+#: Per-user (HKCU, not machine-wide HKLM) registry key tvnserver reads its
+#: own settings from in "-run" (per-session) mode - confirmed by
+#: `-run`-mode config (password, auth) already living under this same key
+#: on a real machine. TightVNC does NOT automatically offset its listening
+#: port by Windows session id on its own - confirmed live: with no RfbPort
+#: value set, `-run` listened on the default 5900 regardless of which
+#: session launched it, and a poll of VNC_PORT_BASE + session_id (5908 for
+#: session 8) then timed out, exactly the failure mode this was found
+#: from. Writing RfbPort here before launching is what actually makes
+#: tvnserver listen where the toolkit's join-URL convention expects.
+_TVNSERVER_REGISTRY_KEY = r"Software\TightVNC\Server"
+
+
+def _set_tvnserver_port(port: int) -> None:
+    """Write `RfbPort` (a `REG_DWORD`) under `_TVNSERVER_REGISTRY_KEY` so
+    the next `tvnserver -run` actually listens on `port`, instead of its
+    configured/default port (5900 - TightVNC has no built-in notion of
+    "offset by session id" on its own).
+
+    Confirmed live: setting this to 5908 and then launching `tvnserver
+    -run` produced a listener on 5908, not 5900 - this is a genuine,
+    documented TightVNC setting, not a guess.
+
+    Best-effort: a failure here (e.g. no registry write permission) is
+    logged, not raised - `start_vnc_server()` still attempts the launch
+    regardless, just without a guaranteed-correct port in that case,
+    matching every other infra-readiness step in this flow.
+    """
+    try:
+        with winreg.CreateKeyEx(winreg.HKEY_CURRENT_USER, _TVNSERVER_REGISTRY_KEY) as key:
+            winreg.SetValueEx(key, "RfbPort", 0, winreg.REG_DWORD, port)
+    except OSError:
+        logger.exception(
+            "HUMAN_IN_LOOP - could not set tvnserver's RfbPort registry value to %d",
+            port,
+        )
+
+
+def _stop_existing_tvnserver() -> None:
+    """Best-effort: stop any `tvnserver.exe` already running for this
+    session, so the next `-run` picks up a freshly-written `RfbPort` (see
+    `_set_tvnserver_port()`) instead of an already-running instance
+    silently keeping whatever port it started with.
+
+    A second `-run` while one is already active is not enough on its own
+    to pick up a new port - confirmed live: invoking `-run` again while an
+    instance was already listening did not open a new listener on a
+    different configured port, it was simply a no-op. Stopping first is
+    what makes a fresh, correctly-configured instance actually start.
+
+    `taskkill` here can only ever affect processes this same Windows
+    account owns, even with no extra scoping - a standard user process
+    cannot terminate another account's process regardless, so this cannot
+    reach across sessions/accounts on a shared host.
+    """
+    try:
+        subprocess.run(
+            ["taskkill", "/F", "/IM", "tvnserver.exe"],
+            capture_output=True, check=False,
+        )
+    except Exception:
+        logger.debug(
+            "HUMAN_IN_LOOP - could not stop an existing tvnserver instance", exc_info=True,
+        )
+
 
 def _resolve_tvnserver_path() -> str:
     """Best-effort resolution of tvnserver.exe's actual location on this
@@ -190,6 +255,18 @@ def start_vnc_server(session_id: int, timeout_s: float = VNC_PORT_POLL_TIMEOUT_S
     TightVNC genuinely installed (see that function's docstring for the
     full resolution order).
 
+    Before launching, also writes the target port to the registry
+    (`_set_tvnserver_port()`) and stops any already-running instance for
+    this session (`_stop_existing_tvnserver()`). Both are necessary, not
+    defensive extras: TightVNC has no built-in notion of listening on
+    `VNC_PORT_BASE + session_id` on its own - confirmed live that, with no
+    `RfbPort` set, `-run` listens on the plain default (5900) regardless of
+    session, and a poll of the session-specific port then times out
+    (exactly the failure this was found from); and a second `-run` while
+    an instance is already active does not pick up a newly-written port,
+    it is simply a no-op, so a stale instance from an earlier attempt has
+    to be stopped first for the new setting to actually take effect.
+
     Launching itself is fire-and-forget: `Popen`, not `run`, since
     `tvnserver -run` is a long-lived process that keeps serving VNC
     connections for the rest of this session - waiting for it to exit (what
@@ -215,6 +292,9 @@ def start_vnc_server(session_id: int, timeout_s: float = VNC_PORT_POLL_TIMEOUT_S
     """
     port = VNC_PORT_BASE + session_id
     tvnserver_path = _resolve_tvnserver_path()
+
+    _set_tvnserver_port(port)
+    _stop_existing_tvnserver()
 
     try:
         subprocess.Popen([tvnserver_path, "-run"])

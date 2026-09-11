@@ -81,7 +81,12 @@ for detail in job_details:
   "App Paths" registry key, then TightVNC's default install locations -
   not a bare `"tvnserver"` string, which only resolves via `PATH` and
   reliably failed on a real run node with TightVNC installed but not on
-  `PATH`. `prepare_vnc_session(human_in_loop_flag,
+  `PATH`. Before launching, it also writes the target port into the
+  registry and stops any already-running instance for this session
+  (0.8.11) - TightVNC has no built-in "listen on `5900 + session_id`"
+  behaviour of its own; confirmed live that a bare `-run` always used the
+  plain default port regardless of session until this was added.
+  `prepare_vnc_session(human_in_loop_flag,
   timeout_s=10.0)` (0.8.9) wraps the whole thing generically: pass it a job
   row's `human_in_loop` value - `None` if falsy (nothing to prepare), or
   `(rdp_host, session_id)` if truthy, having already resolved both and

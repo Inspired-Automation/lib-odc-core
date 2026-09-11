@@ -254,6 +254,33 @@ entry point of its own.
   the same reason - never add another `window.*` global here.
 
 ## Change Log
+- 2026-09-11: v0.8.11 - fixed `start_vnc_server()`'s port poll timing out
+  (`"VNC port 5908 did not open within 10.0s..."`, live on
+  `svc.UATBotrunner01` right after the v0.8.10 fix let tvnserver actually
+  launch): TightVNC has no built-in notion of listening on
+  `VNC_PORT_BASE + session_id` on its own. Confirmed empirically on a real
+  dev machine with TightVNC installed - with no `RfbPort` value set,
+  `-run` listened on the plain default (5900) every time, regardless of
+  which Windows session launched it; setting `RfbPort` (`REG_DWORD`) under
+  `HKCU\Software\TightVNC\Server` to 5908 *before* launching produced a
+  listener on exactly 5908 - this is a genuine, documented TightVNC
+  setting, not a guess (confirmed via a web search turning up a real
+  `vnc.reg` example and the TightVNC WiX installer's own properties file,
+  both showing `RfbPort`/`ExtraPorts` under that same key).
+  - Added `human_in_loop._set_tvnserver_port(port)` - writes that registry
+    value; best-effort, logged not raised on failure.
+  - Added `human_in_loop._stop_existing_tvnserver()` - also confirmed live
+    that a second `-run` while an instance is already active for this
+    session does **not** pick up a freshly-written port; it's simply a
+    no-op (the already-running instance keeps whatever port it started
+    with). So a stale instance from an earlier attempt is stopped
+    (`taskkill /F /IM tvnserver.exe` - can only ever affect processes this
+    same account owns, Windows itself prevents reaching across
+    accounts/sessions) before every fresh launch, not just the first one.
+  - `start_vnc_server()` now calls both before `Popen()`. Verified
+    end-to-end on a real dev machine with the *actual*, unmocked function
+    (not just the unit tests): `start_vnc_server(8, timeout_s=8.0)`
+    returned `True` and `netstat` confirmed a listener on `0.0.0.0:5908`.
 - 2026-09-11: v0.8.10 - fixed `start_vnc_server()` raising `FileNotFoundError`
   on a real run node (`svc.UATBotrunner01`) with TightVNC genuinely
   installed: `subprocess.Popen(["tvnserver", "-run"])` only searches the

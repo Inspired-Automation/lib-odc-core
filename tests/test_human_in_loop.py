@@ -55,15 +55,19 @@ def test_get_current_session_id_raises_on_failure(monkeypatch):
     assert raised is True
 
 
+@patch("odc_core.human_in_loop._stop_existing_tvnserver")
+@patch("odc_core.human_in_loop._set_tvnserver_port")
 @patch("odc_core.human_in_loop._resolve_tvnserver_path", return_value=r"C:\TightVNC\tvnserver.exe")
 @patch("odc_core.human_in_loop.socket.create_connection")
 @patch("odc_core.human_in_loop.subprocess.Popen")
 def test_start_vnc_server_launches_and_confirms_port_open(
-    mock_popen, mock_create_connection, mock_resolve_path,
+    mock_popen, mock_create_connection, mock_resolve_path, mock_set_port, mock_stop_existing,
 ):
     result = human_in_loop.start_vnc_server(3)
 
     assert result is True
+    mock_set_port.assert_called_once_with(human_in_loop.VNC_PORT_BASE + 3)
+    mock_stop_existing.assert_called_once_with()
     mock_popen.assert_called_once_with([r"C:\TightVNC\tvnserver.exe", "-run"])
     mock_create_connection.assert_called_once_with(
         ("127.0.0.1", human_in_loop.VNC_PORT_BASE + 3),
@@ -71,26 +75,83 @@ def test_start_vnc_server_launches_and_confirms_port_open(
     )
 
 
+@patch("odc_core.human_in_loop._stop_existing_tvnserver")
+@patch("odc_core.human_in_loop._set_tvnserver_port")
 @patch("odc_core.human_in_loop._resolve_tvnserver_path", return_value="tvnserver")
 @patch("odc_core.human_in_loop.subprocess.Popen", side_effect=FileNotFoundError("no tvnserver"))
-def test_start_vnc_server_swallows_launch_failure(mock_popen, mock_resolve_path):
+def test_start_vnc_server_swallows_launch_failure(
+    mock_popen, mock_resolve_path, mock_set_port, mock_stop_existing,
+):
     result = human_in_loop.start_vnc_server(3)  # must not raise
 
     assert result is False
     mock_popen.assert_called_once()
 
 
+@patch("odc_core.human_in_loop._stop_existing_tvnserver")
+@patch("odc_core.human_in_loop._set_tvnserver_port")
 @patch("odc_core.human_in_loop._resolve_tvnserver_path", return_value="tvnserver")
 @patch("odc_core.human_in_loop.time.sleep")
 @patch("odc_core.human_in_loop.socket.create_connection", side_effect=OSError("refused"))
 @patch("odc_core.human_in_loop.subprocess.Popen")
 def test_start_vnc_server_times_out_when_port_never_opens(
-    mock_popen, mock_create_connection, mock_sleep, mock_resolve_path,
+    mock_popen, mock_create_connection, mock_sleep, mock_resolve_path, mock_set_port,
+    mock_stop_existing,
 ):
     result = human_in_loop.start_vnc_server(3, timeout_s=0.01)
 
     assert result is False
     mock_create_connection.assert_called()
+
+
+def test_set_tvnserver_port_writes_registry_dword(monkeypatch):
+    written = {}
+
+    class _FakeKey:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc_info):
+            return False
+
+    def fake_set_value_ex(key, name, reserved, value_type, value):
+        written["name"] = name
+        written["type"] = value_type
+        written["value"] = value
+
+    monkeypatch.setattr(
+        human_in_loop.winreg, "CreateKeyEx", lambda *a, **kw: _FakeKey(), raising=False,
+    )
+    monkeypatch.setattr(human_in_loop.winreg, "SetValueEx", fake_set_value_ex, raising=False)
+
+    human_in_loop._set_tvnserver_port(5908)
+
+    assert written == {"name": "RfbPort", "type": human_in_loop.winreg.REG_DWORD, "value": 5908}
+
+
+def test_set_tvnserver_port_swallows_registry_failure(monkeypatch):
+    monkeypatch.setattr(
+        human_in_loop.winreg,
+        "CreateKeyEx",
+        MagicMock(side_effect=OSError("access denied")),
+        raising=False,
+    )
+
+    human_in_loop._set_tvnserver_port(5908)  # must not raise
+
+
+@patch("odc_core.human_in_loop.subprocess.run")
+def test_stop_existing_tvnserver_calls_taskkill(mock_run):
+    human_in_loop._stop_existing_tvnserver()
+
+    mock_run.assert_called_once_with(
+        ["taskkill", "/F", "/IM", "tvnserver.exe"], capture_output=True, check=False,
+    )
+
+
+@patch("odc_core.human_in_loop.subprocess.run", side_effect=OSError("taskkill missing"))
+def test_stop_existing_tvnserver_swallows_failure(mock_run):
+    human_in_loop._stop_existing_tvnserver()  # must not raise
 
 
 def test_resolve_tvnserver_path_prefers_env_var_override(monkeypatch, tmp_path):

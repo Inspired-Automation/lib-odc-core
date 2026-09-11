@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.8.11] - 2026-09-11
+### Fixed
+- `start_vnc_server()`'s port poll timing out - `tvnserver -run` has no
+  built-in notion of listening on `VNC_PORT_BASE + session_id` on its own;
+  confirmed live that with no `RfbPort` registry value set, it listens on
+  the plain default (5900) regardless of session, so a poll of the
+  session-specific port (e.g. 5908) reliably timed out. Added
+  `human_in_loop._set_tvnserver_port()`, writing `RfbPort` (`REG_DWORD`)
+  under `HKCU\Software\TightVNC\Server` before launching - confirmed live
+  this actually redirects the listener to the requested port. Also added
+  `human_in_loop._stop_existing_tvnserver()`: a second `-run` while an
+  instance is already active does not pick up a newly-written port on its
+  own (confirmed live - it's a no-op), so a stale instance from an earlier
+  attempt is now stopped first.
+
 ## [0.8.10] - 2026-09-11
 ### Fixed
 - `start_vnc_server()` raising `FileNotFoundError` on a real run node with
