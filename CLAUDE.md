@@ -4,7 +4,8 @@
 Shared ODC (Online Data Collection) infrastructure library. Provides job claiming,
 file allocation/save, job-status updates, Microsoft Graph mail/OTP helpers,
 browser-automation pacing helpers, and a generalised human-assisted-login
-mechanism (`human_in_loop.py`, 0.8.1) used by every ODC supplier bot project
+mechanism (`human_in_loop.py`, 0.8.1; re-architected onto Control Room's own
+"assist" feature in 0.8.12) used by every ODC supplier bot project
 (`automation-odc-wave`, `automation-odc-british-gas`, `automation-odc-energia`,
 and future suppliers). This is a library, not a Control Room bot - it has no
 entry point of its own.
@@ -26,37 +27,37 @@ entry point of its own.
   `jupiter.aa.web_scrape_data` (an older parallel pipeline consulted only
   for `client_name == "inspired plc"` duplicate checks), and the stored
   procedure `spODC_job_details_UpdateStatus`.
-  `ODC_jobs` also carries five columns added in 0.8.0/0.8.1 -
-  `human_wait_status`/`human_wait_deadline` (0.8.0) and `rdp_host`/
-  `rdp_username`/`rdp_password` (0.8.1) - written only by
-  `jobstodo.set_human_wait()`/`set_human_wait_complete()`/`clear_human_wait()`;
-  see spec §4.2. **Confirmed applied to both `Titan_INSE_DEV` and the live
-  `Titan_INSE`** (queried directly 2026-09-09 via `INFORMATION_SCHEMA.COLUMNS`).
-  One discrepancy from what this repo's DDL specifies:
-  `human_wait_status` was actually created as `VARCHAR(50)`, not
-  `NVARCHAR(30)` - functionally fine for the short ASCII status values this
-  library writes, just noting the drift; the three `rdp_*` columns and
-  `human_wait_deadline` match exactly.
-  A sixth column, `human_wait_started_at`, was part of the original 0.8.0
-  design but dropped before any DDL request went out - nothing reads it (and
-  it does not exist on `Titan_INSE_DEV` either), so only `human_wait_deadline`
-  is kept.
+  `ODC_jobs` no longer carries any human-assisted-login signal columns:
+  `human_wait_status`, `human_wait_deadline`, `rdp_host`, and
+  `rdp_sessionID` (added across 0.8.0/0.8.1/0.8.9) were dropped entirely
+  via `ALTER TABLE ... DROP COLUMN` on both `Titan_INSE_DEV` and the live
+  `Titan_INSE` (2026-09-14, confirmed via `INFORMATION_SCHEMA.COLUMNS`
+  immediately after) - the same day 0.8.12 stopped writing to them.
+  inse-toolkit no longer reads any of these columns, having switched fully
+  to polling Control Room's own job record (fed by the new
+  `assist.request`/`assist.release` file protocol - see
+  `human_in_loop.py`'s module docstring and the 0.8.12 Change Log entry).
+  `jobstodo.set_human_wait()`/`set_human_wait_complete()`/
+  `clear_human_wait()`, which used to own these writes, were already
+  removed from the code in 0.8.12 - see automation-odc-energia's
+  `docs/lib-odc-core-requirements.md` item 2 (the explicit ask to drop
+  these writes rather than leave them as harmless-but-dead). Before
+  dropping, `Titan_INSE_DEV` had exactly one row (job 145 - the same
+  `BoxFIsh`/`Energia` test job referenced throughout this file's earlier
+  history) with stale non-NULL values in all four columns, stuck at
+  `PENDING_HUMAN` from earlier live testing and never cleared; the live
+  `Titan_INSE` had zero non-NULL rows across all four. Nothing of value
+  was lost either way.
   **0.8.8**: this mechanism reverted from RDP back to VNC (see the Change
-  Log entry) - only `rdp_host` is still written (it now carries a VNC host,
-  a deliberate naming drift kept to avoid a DDL change - see spec §4.2).
+  Log entry) - only `rdp_host` was still written after that (it carried a
+  VNC host, a deliberate naming drift kept to avoid a DDL change).
   `rdp_username`/`rdp_password` were dropped from `ODC_jobs` entirely via
   `ALTER TABLE ... DROP COLUMN` on both `Titan_INSE_DEV` and the live
   `Titan_INSE` (2026-09-10, confirmed via `INFORMATION_SCHEMA.COLUMNS`
-  immediately after) - so `ODC_jobs` briefly carried four of these columns,
-  not five.
-  **0.8.9** (2026-09-11): a new `rdp_sessionID` column (`INT`) holds the
-  run node's own Windows session id. The toolkit needs this to build a
-  job's VNC join URL as `5900 + session_id`, since a single `rdp_host` can
-  run more than one session at once. See spec §4.2 and
-  `human_in_loop.get_current_session_id()`. (Briefly added by re-adding and
-  repurposing the just-dropped `rdp_username` column under its old name,
-  then renamed to `rdp_sessionID` the same day once that mismatch was
-  flagged - nothing had been released yet, so no legacy caller to break.)
+  immediately after).
+  **0.8.9** added a `rdp_sessionID` column (`INT`) to hold the run node's
+  own Windows session id, for the same now-superseded VNC-provisioning
+  design - also now dropped, per above.
 - `ODC_suppliers` (pre-existing, not owned by this library) carries
   `human_in_loop` (nullable `tinyint`) - a **per-supplier**, not per-job,
   flag for "does this supplier's login require a human". Confirmed on both
@@ -127,18 +128,29 @@ entry point of its own.
   other error surface on the first attempt. Replaying is safe for the units in
   this package because a transient SQLSTATE means nothing was committed; check
   that before wrapping a partially-committed multi-statement unit.
-- Human-assisted login (0.8.1, poll-trigger fix in 0.8.2): a supplier checks
+- Human-assisted login (0.8.1, poll-trigger fix in 0.8.2, re-architected in
+  0.8.12 onto Control Room's own "assist" feature): a supplier checks
   `human_in_loop` on any row `jobstodo.get_job_details()` returns
   (left-joined from `ODC_suppliers`, §4.3) and, if truthy, calls
-  `human_in_loop.wait_for_human_login()` instead of driving its own login.
-  That one call owns the entire lifecycle - the on-page banner and confirm
-  button, the poll loop, and the
-  `jobstodo.set_human_wait()`/`set_human_wait_complete()`/`clear_human_wait()`
-  sequencing - so a supplier project only has to supply `is_logged_in(page)`,
-  its own portal-specific "did the login succeed" check. **`is_logged_in()`
-  does not end the wait on its own** (fixed in 0.8.2 - see Change Log): only
-  the injected confirm button does; `is_logged_in()` is logged at each
-  heartbeat purely as a diagnostic. Generalised out of
+  `human_in_loop.request_assist(job_id, reason, job_dir)` **before**
+  `page.goto()` navigates anywhere, then (after navigation/cookie-banner
+  handling, once `page` is on the login page) calls
+  `human_in_loop.wait_for_human_login()`. The split exists so Control
+  Room's node agent's own VNC/websockify provisioning - an unknown, possibly
+  non-trivial delay - overlaps with the browser's navigation instead of
+  happening strictly after it; see automation-odc-energia's
+  `docs/lib-odc-core-requirements.md` item 1. `wait_for_human_login()` owns
+  the on-page banner, the confirm button, and the poll loop, calling
+  `human_in_loop.release_assist()` in its own `finally` on every exit - a
+  supplier project only has to supply `is_logged_in(page)`, its own
+  portal-specific "did the login succeed" check, and `job_dir`, its own
+  per-run job directory (e.g. `ctx.job_file.parent` from
+  `automation_core.setup()`). **`is_logged_in()` does not end the wait on
+  its own** (fixed in 0.8.2 - see Change Log): only the injected confirm
+  button does; `is_logged_in()` is logged at each heartbeat purely as a
+  diagnostic. 0.8.12 removed the `ODC_jobs` DB signal and the
+  VNC-server-launching machinery this mechanism used before - see the
+  Databases section and the 0.8.12 Change Log entry. Generalised out of
   `automation-odc-energia`'s Phase 3, the only current `human_in_loop=1`
   supplier.
 
@@ -252,8 +264,121 @@ entry point of its own.
   genuine click never registered. If any future signal needs adding to this
   mechanism, keep it DOM-based (an attribute, a class, `textContent`) for
   the same reason - never add another `window.*` global here.
+- **0.8.12**: `human_in_loop.release_assist()`'s crash-path teardown
+  guarantee is exactly as strong as a Python `try`/`finally` can be, no
+  stronger - it only covers this process exiting through its own call
+  stack (a genuine failure, a timeout, or an exception propagating out of
+  the poll loop). A hard kill (crash, `SIGKILL`, power loss) before that
+  line runs writes nothing at all. Whether that gap is covered by Control
+  Room's node agent independently detecting a dead bot process has not
+  been confirmed - see automation-odc-energia's
+  `docs/lib-odc-core-requirements.md` item 4 - and is not something
+  lib-odc-core can close on its own regardless of the answer.
+- **0.8.12**: the exact `assist.request`/`assist.release` file names, the
+  `{"reason": ...}` JSON schema, and the temp-file-then-rename atomicity
+  approach in `human_in_loop.request_assist()`/`release_assist()` are this
+  library's best-effort implementation of a protocol described secondhand
+  in automation-odc-energia's docs, not yet confirmed against Control
+  Room's own API/node-agent docs (see that repo's
+  `docs/lib-odc-core-requirements.md` item 6). If the real protocol turns
+  out to differ (different filenames, a richer schema, no atomicity
+  requirement at all), this needs a follow-up release before the
+  Energia consumer can go live on 0.8.12 in production.
+- **Superseded by 0.8.12 (kept for history):** every Known Gotchas entry
+  above about `ODC_jobs.human_wait_status`/`rdp_host`/`rdp_sessionID` (the
+  `is_logged_in()`-vs-confirm-button trigger ambiguity aside, which is
+  still current) describes a DB-signal design this library no longer
+  implements at all - inse-toolkit switched to polling Control Room's own
+  job record instead. See the Databases section and the 0.8.12 Change Log
+  entry.
 
 ## Change Log
+- 2026-09-14: v0.8.12 - re-architected the human-assisted-login mechanism
+  onto Control Room's own native "assist" feature, per
+  automation-odc-energia's `docs/lib-odc-core-requirements.md` (the
+  distilled, implementation-facing half of
+  `docs/energia-human-assisted-login-control-room-contract.md` in that same
+  repo). Control Room now has a node agent, resident on each automation
+  host, that already does everything the previous
+  `ODC_jobs`-signal/tvnserver-launching design did - it just didn't yet
+  trigger itself automatically, which is the actual ask this version
+  implements.
+  - **Split `wait_for_human_login()` in two** (requirements doc item 1 -
+    "the actual blocker"): the old single call both signalled "need a
+    human" and blocked polling for login completion, which made it
+    impossible to trigger the signal early (before `page.goto()`) without
+    also blocking on a not-yet-navigated page. Added
+    `human_in_loop.request_assist(job_id, reason, job_dir)` - non-blocking,
+    writes `assist.request` and returns immediately, safe to call before
+    `page.goto()`. `wait_for_human_login()` itself is unchanged otherwise
+    (banner, confirm button, poll loop) but no longer triggers assist - a
+    caller now calls both, in that order, instead of one combined call.
+  - **Stopped writing `ODC_jobs.human_wait_status`/`rdp_host`/
+    `rdp_sessionID`** (requirements doc item 2): removed
+    `jobstodo.set_human_wait()`, `set_human_wait_complete()`, and
+    `clear_human_wait()` entirely, along with the `HUMAN_WAIT_PENDING`/
+    `HUMAN_WAIT_COMPLETE` constants and their SQL. inse-toolkit confirmed
+    it no longer reads any of these columns - it fully switched to polling
+    Control Room's own job record (`assist_phase`/`assist_url`/
+    `assist_reason`/`assist_expires_in_s` on the existing
+    `GET /api/v1/jobs/{job_id}`, requirements doc item 3 - not a new
+    endpoint, and not something lib-odc-core implements or calls, since
+    Control Room's node agent owns writing those fields). The four
+    now-unused `ODC_jobs` columns were dropped via
+    `ALTER TABLE ... DROP COLUMN` on both `Titan_INSE_DEV` and the live
+    `Titan_INSE` (2026-09-14, same day, confirmed via
+    `INFORMATION_SCHEMA.COLUMNS` immediately after), the same pattern as
+    the 0.8.8 `rdp_username`/`rdp_password` drop - see the Databases
+    section for what was checked (one stale non-NULL row on DEV, job 145,
+    nothing on live) before dropping.
+  - **Removed the VNC-provisioning machinery this module used to own**:
+    `get_current_hostname()`, `get_current_session_id()`,
+    `start_vnc_server()`, `prepare_vnc_session()`, and the tvnserver
+    path-resolution/registry helpers behind them (0.8.7-0.8.11) are all
+    gone. Per the contract doc §6, VNC/websockify session provisioning is
+    now entirely Control Room's node agent's own responsibility - this bot
+    (and lib-odc-core) never needed to launch a VNC server itself once the
+    node agent could do it in response to `assist.request`.
+  - **Added `human_in_loop.release_assist(job_id, job_dir)`**, called from
+    `wait_for_human_login()`'s own `finally` on every exit path (success,
+    failure, timeout, or an exception from `is_logged_in()`/the poll
+    loop) - the equivalent guarantee the old design got from a `finally`
+    around `jobstodo.clear_human_wait()` (requirements doc item 4). Writes
+    `assist.release` (empty file). Documented explicitly, not assumed:
+    this guarantee only covers the process exiting through its own Python
+    call stack - a hard kill before that line runs writes nothing, and
+    closing that gap needs Control Room's node agent to independently
+    detect a dead bot process, which is outside this library's own reach.
+    See the new Known Gotchas entry.
+  - **`job_dir` is caller-supplied, not resolved by lib-odc-core**: there
+    is no existing convention in this codebase for a per-job directory
+    (`file_allocation.py`'s target folder is not it), and the real
+    directory is decided by Control Room's own agent at launch time, not
+    by lib-odc-core or the DB. Per the developer directly: the bot already
+    has this as `ctx.job_file.parent`, where
+    `ctx = automation_core.setup(...)` resolved it from
+    `--job-file`/`CR_JOB_FILE` - the same directory `lib-core` already
+    writes a `cr_errors.json` sidecar into. `request_assist()`/
+    `wait_for_human_login()` take it as an explicit parameter rather than
+    lib-odc-core guessing a location, the same philosophy as `dsn`/
+    `tables` being caller-supplied everywhere else in this package.
+  - **Filename/schema/atomicity for `assist.request`/`assist.release` are
+    best-effort, not confirmed** (requirements doc item 6): implemented
+    with the defaults both `automation-odc-energia` docs already describe
+    - literal `assist.request`/`assist.release` names, `{"reason": ...}`
+    JSON, temp-file-then-rename for atomicity (`human_in_loop._atomic_write()`)
+    - flagged clearly in code/here as unverified against Control Room's
+    real API/node-agent docs, matching how this repo has shipped
+    provisional designs before (e.g. the 0.8.0 DDL that was only confirmed
+    applied two versions later). Items 3 and 5 from the requirements doc
+    (exact `assist_phase`/`assist_url` semantics, the node agent's actual
+    noVNC port) are Control Room/inse-toolkit's own fields to confirm, not
+    something lib-odc-core writes or reads at all.
+  - `automation-odc-energia` (the only current `human_in_loop=1` consumer)
+    needs matching updates - `main.py`/`energia_supplier.py` calling
+    `request_assist()` before the browser launches and the new
+    `wait_for_human_login()` signature after - tracked as a separate,
+    parallel change in that repo's own `CLAUDE.md`, not here.
 - 2026-09-11: v0.8.11 - fixed `start_vnc_server()`'s port poll timing out
   (`"VNC port 5908 did not open within 10.0s..."`, live on
   `svc.UATBotrunner01` right after the v0.8.10 fix let tvnserver actually
@@ -641,6 +766,34 @@ entry point of its own.
   does not exist and made the documented `pip install` URLs 404).
 
 ## Outstanding TODOs
+- Cut a `v0.8.12` release with the built wheel attached, following
+  `RELEASING.md`. `automation-odc-energia` (the only current
+  `human_in_loop=1` consumer) needs to pin `v0.8.12` and update
+  `main.py`/`energia_supplier.py` to call
+  `human_in_loop.request_assist(job_id, reason, job_dir)` before the
+  browser launches (in place of the old `prepare_vnc_session()` call) and
+  to pass `job_dir` (`ctx.job_file.parent`) to the new
+  `wait_for_human_login()` signature - tracked in that repo's own
+  CLAUDE.md, not here.
+- Confirm the items in automation-odc-energia's
+  `docs/lib-odc-core-requirements.md` that only Control Room/inse-toolkit's
+  owners can verify, not lib-odc-core: item 3's exact `assist_phase`
+  string vocabulary/casing and whether `assist_url` is unconditionally
+  usable as an `<iframe src>` with no extra credential on every host; item
+  4's crash-path teardown guarantee (does the node agent detect a dead bot
+  process independently, or is `release_assist()`'s `try`/`finally` the
+  only guarantee that exists); item 5's actual noVNC port; and item 6's
+  exact `assist.request`/`assist.release` file protocol (this release
+  shipped with the requirements doc's own best-effort defaults - see the
+  0.8.12 Change Log entry and the two new Known Gotchas entries). None of
+  these block `v0.8.12`'s own release, but production reliance on the
+  assist flow should not proceed until they're confirmed.
+- **Resolved (2026-09-14)**: the four now-unused `ODC_jobs` columns
+  (`human_wait_status`/`human_wait_deadline`/`rdp_host`/`rdp_sessionID`)
+  were dropped via `ALTER TABLE ... DROP COLUMN` on both `Titan_INSE_DEV`
+  and the live `Titan_INSE`, confirmed via `INFORMATION_SCHEMA.COLUMNS`
+  immediately after - see the Databases section and the 0.8.12 Change Log
+  entry.
 - Cut a `v0.8.9` release with the built wheel attached, following
   `RELEASING.md`. `automation-odc-energia` (the only current
   `human_in_loop=1` consumer) needs to pin `v0.8.9` and update its own

@@ -7,6 +7,65 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.8.12] - 2026-09-14
+### Changed
+- Replaced the human-assisted-login mechanism's job-level signal:
+  Control Room now has its own native "assist" feature (a node agent
+  resident on each automation host) that supersedes the
+  `ODC_jobs.human_wait_status`/`rdp_host`/`rdp_sessionID` DB
+  signal/VNC-provisioning design entirely. See
+  automation-odc-energia's `docs/lib-odc-core-requirements.md` and
+  `docs/energia-human-assisted-login-control-room-contract.md` for the
+  full rationale.
+- **Breaking**: `human_in_loop.wait_for_human_login()` no longer takes
+  `rdp_host`/`session_id`/`tables`/`dsn` - it no longer touches
+  `ODC_jobs` at all. Gained a required `job_dir` parameter instead (the
+  bot's own per-run job directory, e.g. `ctx.job_file.parent` from
+  `automation_core.setup()`), used to write `assist.release` on every
+  exit path (success, failure, timeout, or an exception from
+  `is_logged_in()`) via a `finally`, replacing the old
+  `jobstodo.clear_human_wait()` call.
+- **Breaking**: `jobstodo.set_human_wait()`, `set_human_wait_complete()`,
+  and `clear_human_wait()` (and the `HUMAN_WAIT_PENDING`/
+  `HUMAN_WAIT_COMPLETE` constants) are removed entirely - inse-toolkit no
+  longer reads any of the columns they wrote.
+- **Breaking**: `human_in_loop.get_current_hostname()`,
+  `get_current_session_id()`, `start_vnc_server()`, and
+  `prepare_vnc_session()` (and the tvnserver-path/registry helpers behind
+  them) are removed entirely - VNC/websockify session provisioning is now
+  Control Room's node agent's own responsibility, not this bot's or
+  lib-odc-core's.
+### Removed
+- `ODC_jobs.human_wait_status`/`human_wait_deadline`/`rdp_host`/
+  `rdp_sessionID` columns, dropped via `ALTER TABLE ... DROP COLUMN`
+  against both `Titan_INSE_DEV` and the live `Titan_INSE` (2026-09-14),
+  confirmed via `INFORMATION_SCHEMA.COLUMNS` immediately after - nothing
+  reads or writes them anymore. One stale non-NULL row on DEV (job 145,
+  earlier test data stuck at `PENDING_HUMAN`) and nothing on live were
+  checked beforehand; nothing of value was lost.
+### Added
+- `human_in_loop.request_assist(job_id, reason, job_dir)` - non-blocking,
+  writes `assist.request` (`{"reason": reason}`, temp-file-then-rename)
+  into `job_dir`, signalling Control Room's node agent that this job needs
+  a human-assisted session. Callable before `page.goto()`, unlike the old
+  single combined call, so the node agent's own VNC provisioning can
+  overlap with the browser's navigation instead of happening strictly
+  after it.
+- `human_in_loop.release_assist(job_id, job_dir)` - writes
+  `assist.release` (empty file) into `job_dir`. Called automatically from
+  `wait_for_human_login()`'s own `finally`.
+### Known limitations
+- The exact `assist.request`/`assist.release` file names, JSON schema, and
+  atomicity approach are this library's best-effort implementation of a
+  protocol described secondhand (not yet confirmed against Control Room's
+  own API/node-agent docs) - see
+  `docs/lib-odc-core-requirements.md` item 6 in automation-odc-energia.
+- `release_assist()`'s guarantee only covers this process exiting through
+  its own Python call stack; a hard kill (crash, `SIGKILL`, power loss)
+  before that line runs writes nothing. Closing that gap needs Control
+  Room's node agent to independently detect a dead bot process - outside
+  this library's own reach. See `docs/lib-odc-core-requirements.md` item 4.
+
 ## [0.8.11] - 2026-09-11
 ### Fixed
 - `start_vnc_server()`'s port poll timing out - `tvnserver -run` has no

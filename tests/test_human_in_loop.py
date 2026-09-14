@@ -1,8 +1,7 @@
+import json
 from unittest.mock import MagicMock, patch
 
 from odc_core import human_in_loop
-
-TABLES = {"jobs": "ODC_jobs"}
 
 
 def _page_mock(*, button_confirmed: bool = False) -> MagicMock:
@@ -17,227 +16,6 @@ def _page_mock(*, button_confirmed: bool = False) -> MagicMock:
     return page
 
 
-@patch("odc_core.human_in_loop.socket.gethostname", return_value="MAN-RDS-V12")
-def test_get_current_hostname_wraps_socket(mock_gethostname):
-    assert human_in_loop.get_current_hostname() == "MAN-RDS-V12"
-    mock_gethostname.assert_called_once_with()
-
-
-def test_get_current_session_id_reads_via_kernel32(monkeypatch):
-    def fake_process_id_to_session_id(pid, session_id_ref):
-        session_id_ref._obj.value = 3
-        return 1  # non-zero == success
-
-    monkeypatch.setattr(
-        human_in_loop.ctypes.windll.kernel32,
-        "ProcessIdToSessionId",
-        fake_process_id_to_session_id,
-        raising=False,
-    )
-
-    assert human_in_loop.get_current_session_id() == 3
-
-
-def test_get_current_session_id_raises_on_failure(monkeypatch):
-    monkeypatch.setattr(
-        human_in_loop.ctypes.windll.kernel32,
-        "ProcessIdToSessionId",
-        lambda pid, session_id_ref: 0,  # 0 == failure
-        raising=False,
-    )
-
-    try:
-        human_in_loop.get_current_session_id()
-        raised = False
-    except OSError:
-        raised = True
-
-    assert raised is True
-
-
-@patch("odc_core.human_in_loop._stop_existing_tvnserver")
-@patch("odc_core.human_in_loop._set_tvnserver_port")
-@patch("odc_core.human_in_loop._resolve_tvnserver_path", return_value=r"C:\TightVNC\tvnserver.exe")
-@patch("odc_core.human_in_loop.socket.create_connection")
-@patch("odc_core.human_in_loop.subprocess.Popen")
-def test_start_vnc_server_launches_and_confirms_port_open(
-    mock_popen, mock_create_connection, mock_resolve_path, mock_set_port, mock_stop_existing,
-):
-    result = human_in_loop.start_vnc_server(3)
-
-    assert result is True
-    mock_set_port.assert_called_once_with(human_in_loop.VNC_PORT_BASE + 3)
-    mock_stop_existing.assert_called_once_with()
-    mock_popen.assert_called_once_with([r"C:\TightVNC\tvnserver.exe", "-run"])
-    mock_create_connection.assert_called_once_with(
-        ("127.0.0.1", human_in_loop.VNC_PORT_BASE + 3),
-        timeout=human_in_loop.VNC_PORT_POLL_INTERVAL_S,
-    )
-
-
-@patch("odc_core.human_in_loop._stop_existing_tvnserver")
-@patch("odc_core.human_in_loop._set_tvnserver_port")
-@patch("odc_core.human_in_loop._resolve_tvnserver_path", return_value="tvnserver")
-@patch("odc_core.human_in_loop.subprocess.Popen", side_effect=FileNotFoundError("no tvnserver"))
-def test_start_vnc_server_swallows_launch_failure(
-    mock_popen, mock_resolve_path, mock_set_port, mock_stop_existing,
-):
-    result = human_in_loop.start_vnc_server(3)  # must not raise
-
-    assert result is False
-    mock_popen.assert_called_once()
-
-
-@patch("odc_core.human_in_loop._stop_existing_tvnserver")
-@patch("odc_core.human_in_loop._set_tvnserver_port")
-@patch("odc_core.human_in_loop._resolve_tvnserver_path", return_value="tvnserver")
-@patch("odc_core.human_in_loop.time.sleep")
-@patch("odc_core.human_in_loop.socket.create_connection", side_effect=OSError("refused"))
-@patch("odc_core.human_in_loop.subprocess.Popen")
-def test_start_vnc_server_times_out_when_port_never_opens(
-    mock_popen, mock_create_connection, mock_sleep, mock_resolve_path, mock_set_port,
-    mock_stop_existing,
-):
-    result = human_in_loop.start_vnc_server(3, timeout_s=0.01)
-
-    assert result is False
-    mock_create_connection.assert_called()
-
-
-def test_set_tvnserver_port_writes_registry_dword(monkeypatch):
-    written = {}
-
-    class _FakeKey:
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *exc_info):
-            return False
-
-    def fake_set_value_ex(key, name, reserved, value_type, value):
-        written["name"] = name
-        written["type"] = value_type
-        written["value"] = value
-
-    monkeypatch.setattr(
-        human_in_loop.winreg, "CreateKeyEx", lambda *a, **kw: _FakeKey(), raising=False,
-    )
-    monkeypatch.setattr(human_in_loop.winreg, "SetValueEx", fake_set_value_ex, raising=False)
-
-    human_in_loop._set_tvnserver_port(5908)
-
-    assert written == {"name": "RfbPort", "type": human_in_loop.winreg.REG_DWORD, "value": 5908}
-
-
-def test_set_tvnserver_port_swallows_registry_failure(monkeypatch):
-    monkeypatch.setattr(
-        human_in_loop.winreg,
-        "CreateKeyEx",
-        MagicMock(side_effect=OSError("access denied")),
-        raising=False,
-    )
-
-    human_in_loop._set_tvnserver_port(5908)  # must not raise
-
-
-@patch("odc_core.human_in_loop.subprocess.run")
-def test_stop_existing_tvnserver_calls_taskkill(mock_run):
-    human_in_loop._stop_existing_tvnserver()
-
-    mock_run.assert_called_once_with(
-        ["taskkill", "/F", "/IM", "tvnserver.exe"], capture_output=True, check=False,
-    )
-
-
-@patch("odc_core.human_in_loop.subprocess.run", side_effect=OSError("taskkill missing"))
-def test_stop_existing_tvnserver_swallows_failure(mock_run):
-    human_in_loop._stop_existing_tvnserver()  # must not raise
-
-
-def test_resolve_tvnserver_path_prefers_env_var_override(monkeypatch, tmp_path):
-    fake_exe = tmp_path / "tvnserver.exe"
-    fake_exe.write_text("")
-    monkeypatch.setenv("ODC_TVNSERVER_PATH", str(fake_exe))
-
-    assert human_in_loop._resolve_tvnserver_path() == str(fake_exe)
-
-
-def test_resolve_tvnserver_path_falls_back_to_registry(monkeypatch, tmp_path):
-    monkeypatch.delenv("ODC_TVNSERVER_PATH", raising=False)
-    fake_exe = tmp_path / "tvnserver.exe"
-    fake_exe.write_text("")
-
-    class _FakeKey:
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *exc_info):
-            return False
-
-    monkeypatch.setattr(
-        human_in_loop.winreg, "OpenKey", lambda *a, **kw: _FakeKey(), raising=False,
-    )
-    monkeypatch.setattr(
-        human_in_loop.winreg, "QueryValueEx", lambda key, name: (str(fake_exe), 1), raising=False,
-    )
-
-    assert human_in_loop._resolve_tvnserver_path() == str(fake_exe)
-
-
-def test_resolve_tvnserver_path_falls_back_to_default_locations(monkeypatch, tmp_path):
-    monkeypatch.delenv("ODC_TVNSERVER_PATH", raising=False)
-    monkeypatch.setattr(
-        human_in_loop.winreg,
-        "OpenKey",
-        MagicMock(side_effect=OSError("key not found")),
-        raising=False,
-    )
-    fake_exe = tmp_path / "tvnserver.exe"
-    fake_exe.write_text("")
-    monkeypatch.setattr(human_in_loop, "_TVNSERVER_DEFAULT_PATHS", (str(fake_exe),))
-
-    assert human_in_loop._resolve_tvnserver_path() == str(fake_exe)
-
-
-def test_resolve_tvnserver_path_falls_back_to_bare_name_when_nothing_found(monkeypatch):
-    monkeypatch.delenv("ODC_TVNSERVER_PATH", raising=False)
-    monkeypatch.setattr(
-        human_in_loop.winreg,
-        "OpenKey",
-        MagicMock(side_effect=OSError("key not found")),
-        raising=False,
-    )
-    monkeypatch.setattr(human_in_loop, "_TVNSERVER_DEFAULT_PATHS", ())
-
-    assert human_in_loop._resolve_tvnserver_path() == "tvnserver"
-
-
-@patch("odc_core.human_in_loop.start_vnc_server")
-@patch("odc_core.human_in_loop.get_current_session_id", return_value=3)
-@patch("odc_core.human_in_loop.get_current_hostname", return_value="MAN-RDS-V12")
-def test_prepare_vnc_session_resolves_and_starts_when_human_in_loop_truthy(
-    mock_get_hostname, mock_get_session_id, mock_start_vnc,
-):
-    result = human_in_loop.prepare_vnc_session(1)
-
-    assert result == ("MAN-RDS-V12", 3)
-    mock_start_vnc.assert_called_once_with(3, timeout_s=human_in_loop.VNC_PORT_POLL_TIMEOUT_S)
-
-
-@patch("odc_core.human_in_loop.start_vnc_server")
-@patch("odc_core.human_in_loop.get_current_session_id")
-@patch("odc_core.human_in_loop.get_current_hostname")
-def test_prepare_vnc_session_returns_none_when_human_in_loop_falsy(
-    mock_get_hostname, mock_get_session_id, mock_start_vnc,
-):
-    for falsy in (None, 0, False):
-        assert human_in_loop.prepare_vnc_session(falsy) is None
-
-    mock_get_hostname.assert_not_called()
-    mock_get_session_id.assert_not_called()
-    mock_start_vnc.assert_not_called()
-
-
 def _banner_messages(page: MagicMock) -> list[str]:
     return [
         call.args[1]["message"]
@@ -246,32 +24,56 @@ def _banner_messages(page: MagicMock) -> list[str]:
     ]
 
 
-@patch("odc_core.jobstodo.clear_human_wait")
-@patch("odc_core.jobstodo.set_human_wait_complete")
-@patch("odc_core.jobstodo.set_human_wait")
+def test_request_assist_writes_reason_json(tmp_path):
+    human_in_loop.request_assist("JOB1", "captcha on the Energia portal", tmp_path)
+
+    request_path = tmp_path / human_in_loop.ASSIST_REQUEST_FILENAME
+    assert request_path.exists()
+    assert json.loads(request_path.read_text(encoding="utf-8")) == {
+        "reason": "captcha on the Energia portal",
+    }
+    # no leftover temp file
+    assert list(tmp_path.iterdir()) == [request_path]
+
+
+def test_request_assist_swallows_write_failure(tmp_path):
+    missing_dir = tmp_path / "does-not-exist"
+
+    human_in_loop.request_assist("JOB1", "captcha", missing_dir)  # must not raise
+
+
+def test_release_assist_writes_empty_file(tmp_path):
+    human_in_loop.release_assist("JOB1", tmp_path)
+
+    release_path = tmp_path / human_in_loop.ASSIST_RELEASE_FILENAME
+    assert release_path.exists()
+    assert release_path.read_text(encoding="utf-8") == ""
+
+
+def test_release_assist_swallows_write_failure(tmp_path):
+    missing_dir = tmp_path / "does-not-exist"
+
+    human_in_loop.release_assist("JOB1", missing_dir)  # must not raise
+
+
 @patch("odc_core.human_in_loop.time.sleep")
-def test_started_message_defaults_to_generic_wording(mock_sleep, mock_set, mock_complete, mock_clear):
+def test_started_message_defaults_to_generic_wording(mock_sleep, tmp_path):
     page = _page_mock(button_confirmed=True)
 
     human_in_loop.wait_for_human_login(
-        page, MagicMock(return_value=False), "JOB1", 600,
-        "RDS01", 3, TABLES, "Jupiter", {},
+        page, MagicMock(return_value=False), "JOB1", tmp_path, 600, {},
     )
 
     assert human_in_loop.DEFAULT_STARTED_MESSAGE in _banner_messages(page)
 
 
-@patch("odc_core.jobstodo.clear_human_wait")
-@patch("odc_core.jobstodo.set_human_wait_complete")
-@patch("odc_core.jobstodo.set_human_wait")
 @patch("odc_core.human_in_loop.time.sleep")
-def test_started_message_override_reaches_banner(mock_sleep, mock_set, mock_complete, mock_clear):
+def test_started_message_override_reaches_banner(mock_sleep, tmp_path):
     page = _page_mock(button_confirmed=True)
     custom = "Please resolve the reCAPTCHA challenge, then click 'I'm logged in'"
 
     human_in_loop.wait_for_human_login(
-        page, MagicMock(return_value=False), "JOB1", 600,
-        "RDS01", 3, TABLES, "Jupiter", {},
+        page, MagicMock(return_value=False), "JOB1", tmp_path, 600, {},
         started_message=custom,
     )
 
@@ -280,38 +82,23 @@ def test_started_message_override_reaches_banner(mock_sleep, mock_set, mock_comp
     assert human_in_loop.DEFAULT_STARTED_MESSAGE not in messages
 
 
-@patch("odc_core.jobstodo.clear_human_wait")
-@patch("odc_core.jobstodo.set_human_wait_complete")
-@patch("odc_core.jobstodo.set_human_wait")
 @patch("odc_core.human_in_loop.time.sleep")
-def test_success_via_button_click_completes_and_does_not_clear(
-    mock_sleep, mock_set, mock_complete, mock_clear,
-):
-    # HUMAN_WAIT_COMPLETE is a persistent terminal state on success - a
-    # poller must be able to observe it without racing a fixed window, so
-    # clear_human_wait() must NOT run right after set_human_wait_complete().
+def test_success_via_button_click_releases_assist(mock_sleep, tmp_path):
     page = _page_mock(button_confirmed=True)
     is_logged_in = MagicMock(return_value=False)
 
     result = human_in_loop.wait_for_human_login(
-        page, is_logged_in, "JOB1", 600, "RDS01", 3, TABLES, "Jupiter", {},
+        page, is_logged_in, "JOB1", tmp_path, 600, {},
     )
 
     assert result is True
-    mock_set.assert_called_once_with("JOB1", 600, "RDS01", 3, TABLES, "Jupiter")
-    mock_complete.assert_called_once_with("JOB1", TABLES, "Jupiter")
-    mock_clear.assert_not_called()
     mock_sleep.assert_called_once_with(human_in_loop.TAKEOVER_PAUSE_S)
+    assert (tmp_path / human_in_loop.ASSIST_RELEASE_FILENAME).exists()
 
 
 @patch("odc_core.human_in_loop.browser_helpers.take_error_screenshot")
-@patch("odc_core.jobstodo.clear_human_wait")
-@patch("odc_core.jobstodo.set_human_wait_complete")
-@patch("odc_core.jobstodo.set_human_wait")
 @patch("odc_core.human_in_loop.time.sleep")
-def test_is_logged_in_alone_does_not_trigger_success(
-    mock_sleep, mock_set, mock_complete, mock_clear, mock_screenshot,
-):
+def test_is_logged_in_alone_does_not_trigger_success(mock_sleep, mock_screenshot, tmp_path):
     # is_logged_in() is diagnostic-only: a URL/DOM marker can be true on an
     # intermediate page mid-login, so only the explicit button click may
     # end the wait successfully - see human_in_loop._poll_until_logged_in().
@@ -319,96 +106,43 @@ def test_is_logged_in_alone_does_not_trigger_success(
     is_logged_in = MagicMock(return_value=True)
 
     result = human_in_loop.wait_for_human_login(
-        page, is_logged_in, "JOB1", 0, "RDS01", 3, TABLES, "Jupiter", {},
+        page, is_logged_in, "JOB1", tmp_path, 0, {},
     )
 
     assert result is False
-    mock_complete.assert_not_called()
-    mock_clear.assert_called_once_with("JOB1", TABLES, "Jupiter")
+    assert (tmp_path / human_in_loop.ASSIST_RELEASE_FILENAME).exists()
 
 
 @patch("odc_core.human_in_loop.browser_helpers.take_error_screenshot")
-@patch("odc_core.jobstodo.clear_human_wait")
-@patch("odc_core.jobstodo.set_human_wait_complete")
-@patch("odc_core.jobstodo.set_human_wait")
 @patch("odc_core.human_in_loop.time.sleep")
-def test_timeout_returns_false_and_never_completes(
-    mock_sleep, mock_set, mock_complete, mock_clear, mock_screenshot,
-):
+def test_timeout_returns_false_and_still_releases_assist(mock_sleep, mock_screenshot, tmp_path):
     page = _page_mock()
     is_logged_in = MagicMock(return_value=False)
 
     result = human_in_loop.wait_for_human_login(
-        page, is_logged_in, "JOB1", 0, "RDS01", 3, TABLES, "Jupiter", {},
+        page, is_logged_in, "JOB1", tmp_path, 0, {},
     )
 
     assert result is False
-    mock_complete.assert_not_called()
-    mock_clear.assert_called_once_with("JOB1", TABLES, "Jupiter")
     mock_screenshot.assert_called_once()
+    assert (tmp_path / human_in_loop.ASSIST_RELEASE_FILENAME).exists()
 
 
-@patch("odc_core.jobstodo.clear_human_wait")
-@patch("odc_core.jobstodo.set_human_wait_complete")
-@patch("odc_core.jobstodo.set_human_wait", side_effect=Exception("column does not exist"))
 @patch("odc_core.human_in_loop.time.sleep")
-def test_set_human_wait_failure_is_swallowed_and_wait_still_runs(
-    mock_sleep, mock_set, mock_complete, mock_clear,
-):
-    page = _page_mock(button_confirmed=True)
-    is_logged_in = MagicMock(return_value=False)
-
-    result = human_in_loop.wait_for_human_login(
-        page, is_logged_in, "JOB1", 600, "RDS01", 3, TABLES, "Jupiter", {},
-    )
-
-    assert result is True
-    mock_complete.assert_called_once()
-    mock_clear.assert_not_called()
-
-
-@patch("odc_core.human_in_loop.browser_helpers.take_error_screenshot")
-@patch("odc_core.jobstodo.clear_human_wait", side_effect=Exception("column does not exist"))
-@patch("odc_core.jobstodo.set_human_wait_complete")
-@patch("odc_core.jobstodo.set_human_wait")
-@patch("odc_core.human_in_loop.time.sleep")
-def test_clear_human_wait_failure_is_swallowed(
-    mock_sleep, mock_set, mock_complete, mock_clear, mock_screenshot,
-):
-    # Only a non-success (here, timeout) path calls clear_human_wait() at
-    # all, so that is where its own failure needs to be exercised.
-    page = _page_mock(button_confirmed=False)
-    is_logged_in = MagicMock(return_value=False)
-
-    result = human_in_loop.wait_for_human_login(
-        page, is_logged_in, "JOB1", 0, "RDS01", 3, TABLES, "Jupiter", {},
-    )
-
-    assert result is False
-    mock_clear.assert_called_once()
-
-
-@patch("odc_core.jobstodo.clear_human_wait")
-@patch("odc_core.jobstodo.set_human_wait_complete")
-@patch("odc_core.jobstodo.set_human_wait")
-@patch("odc_core.human_in_loop.time.sleep")
-def test_is_logged_in_exception_still_clears_wait_and_propagates(
-    mock_sleep, mock_set, mock_complete, mock_clear,
-):
+def test_is_logged_in_exception_still_releases_assist_and_propagates(mock_sleep, tmp_path):
     page = _page_mock()
     is_logged_in = MagicMock(side_effect=RuntimeError("portal exploded"))
 
     try:
         human_in_loop.wait_for_human_login(
-            page, is_logged_in, "JOB1", 600, "RDS01", 3, TABLES, "Jupiter", {},
+            page, is_logged_in, "JOB1", tmp_path, 600, {},
         )
         raised = False
     except RuntimeError:
         raised = True
 
     assert raised is True
-    mock_complete.assert_not_called()
-    mock_clear.assert_called_once_with("JOB1", TABLES, "Jupiter")
+    assert (tmp_path / human_in_loop.ASSIST_RELEASE_FILENAME).exists()
 
 
 def test_confirm_button_state_uses_dom_not_window_global():

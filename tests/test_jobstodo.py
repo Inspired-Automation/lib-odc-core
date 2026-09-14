@@ -151,61 +151,8 @@ def test_clear_job_claim_commits(mock_connect):
     conn.commit.assert_called_once()
 
 
-@patch("odc_core.db.pyodbc.connect")
-def test_set_human_wait_commits_with_status_timeout_host_session_and_job_id(mock_connect):
-    cursor = MagicMock()
-    conn = _connect_mock(cursor)
-    mock_connect.return_value = conn
-
-    jobstodo.set_human_wait("JOB1", 600, "RDS01", 3, TABLES, "Jupiter")
-
-    cursor.execute.assert_called_once()
-    sql, params = cursor.execute.call_args.args[0], cursor.execute.call_args.args[1:]
-    assert "human_wait_status" in sql
-    assert "human_wait_deadline" in sql
-    assert "rdp_host" in sql
-    # 0.8.9: rdp_sessionID (INT) holds the session id.
-    assert "rdp_sessionID" in sql
-    assert "rdp_username" not in sql
-    assert "rdp_password" not in sql
-    assert params == (jobstodo.HUMAN_WAIT_PENDING, 600, "RDS01", 3, "JOB1")
-    conn.commit.assert_called_once()
-
-
-@patch("odc_core.db.pyodbc.connect")
-def test_set_human_wait_complete_only_updates_status(mock_connect):
-    # 0.8.5: rdp_host/rdp_sessionID and human_wait_deadline are
-    # deliberately left untouched - only human_wait_status changes, so a
-    # poller/audit trail can see which machine/session a completed job used.
-    cursor = MagicMock()
-    conn = _connect_mock(cursor)
-    mock_connect.return_value = conn
-
-    jobstodo.set_human_wait_complete("JOB1", TABLES, "Jupiter")
-
-    cursor.execute.assert_called_once()
-    sql, params = cursor.execute.call_args.args[0], cursor.execute.call_args.args[1:]
-    assert "human_wait_status" in sql
-    assert "rdp_host" not in sql
-    assert "rdp_sessionID" not in sql
-    assert "human_wait_deadline" not in sql
-    assert params == (jobstodo.HUMAN_WAIT_COMPLETE, "JOB1")
-    conn.commit.assert_called_once()
-
-
-@patch("odc_core.db.pyodbc.connect")
-def test_clear_human_wait_commits(mock_connect):
-    cursor = MagicMock()
-    conn = _connect_mock(cursor)
-    mock_connect.return_value = conn
-
-    jobstodo.clear_human_wait("JOB1", TABLES, "Jupiter")
-
-    cursor.execute.assert_called_once()
-    sql, params = cursor.execute.call_args.args[0], cursor.execute.call_args.args[1:]
-    assert "human_wait_status = NULL" in sql
-    assert "rdp_host = NULL" in sql
-    # 0.8.9: rdp_sessionID is nulled again too.
-    assert "rdp_sessionID = NULL" in sql
-    assert params == ("JOB1",)
-    conn.commit.assert_called_once()
+# 0.8.12: set_human_wait()/set_human_wait_complete()/clear_human_wait() and
+# the ODC_jobs human_wait_status/rdp_host/rdp_sessionID signal they wrote
+# were removed entirely - see jobstodo.py's module-level comment and
+# human_in_loop.py's request_assist()/release_assist() for the file-based
+# replacement now covered by tests/test_human_in_loop.py.

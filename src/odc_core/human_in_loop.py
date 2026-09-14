@@ -1,7 +1,10 @@
 """Generic human-assisted-login mechanism for ODC_suppliers.human_in_loop
 suppliers: an on-page banner, an injected "I'm logged in" confirm button,
-and the full ODC_jobs signal lifecycle (jobstodo.set_human_wait() /
-set_human_wait_complete() / clear_human_wait()) wrapped around a poll loop.
+a poll loop, and a file-based signal to Control Room's own node agent
+(`request_assist()` / `release_assist()`), which now owns VNC/websockify
+session provisioning entirely - lib-odc-core no longer starts a VNC server
+or touches ODC_jobs for any of this (see the 0.8.12 Change Log entry and
+automation-odc-energia's docs/lib-odc-core-requirements.md).
 
 Generalised out of automation-odc-energia's Phase 3 (the first, and so far
 only, human_in_loop=1 supplier - see jobstodo.get_job_details()'s
@@ -9,362 +12,151 @@ human_in_loop column, joined from ODC_suppliers). Detecting that a human has
 actually finished logging in is inherently supplier-specific - each portal
 has its own post-login marker - so that stays the caller's responsibility,
 supplied as `is_logged_in`. Everything else here (the banner, the button,
-the poll loop, and the DB signal around it) is supplier-agnostic. See
-lib-odc-core-spec.md §4.2/§4.3.
+the poll loop, and the assist file signal around it) is supplier-agnostic.
+
+0.8.12 replaced the previous ODC_jobs.human_wait_status/rdp_host/
+rdp_sessionID DB signal, and the tvnserver-launching machinery that used to
+sit in this module (get_current_hostname(), get_current_session_id(),
+start_vnc_server(), prepare_vnc_session(), and their registry/App-Paths
+helpers), with a file-based request/release protocol Control Room's own
+node agent watches directly: `request_assist()` (non-blocking, call before
+`page.goto()`) writes `assist.request`; `wait_for_human_login()` (unchanged
+otherwise: banner, confirm button, poll loop) now calls `release_assist()`
+in its own `finally` instead of touching the database. See
+automation-odc-energia's docs/lib-odc-core-requirements.md for the full
+rationale and the items still unverified against Control Room's own docs
+(exact file schema/atomicity, crash-path teardown guarantee).
 """
 
 from __future__ import annotations
 
-import ctypes
+import json
 import logging
 import os
-import socket
-import subprocess
 import time
-import winreg
 from collections.abc import Callable
+from pathlib import Path
 from typing import Any
 
-from . import browser_helpers, jobstodo
+from . import browser_helpers
 
 logger = logging.getLogger(__name__)
 
+#: Filenames for the assist.request/assist.release file protocol - Control
+#: Room's node agent watches the bot's own per-run job directory (the
+#: folder containing the job.json Control Room already told the bot about
+#: at launch, e.g. `ctx.job_file.parent` where `ctx = automation_core.setup(...)`
+#: resolved it from `--job-file`/`CR_JOB_FILE` - lib-odc-core does not
+#: resolve or guess this path itself, see request_assist()'s docstring) for
+#: these two files.
+#:
+#: Best-effort implementation of a protocol flagged as unverified against
+#: Control Room's own docs - see automation-odc-energia's
+#: docs/lib-odc-core-requirements.md items 1 and 6. Confirm the exact
+#: filenames/schema/atomicity expectation before relying on this in
+#: production; update here (and bump the version) once confirmed.
+ASSIST_REQUEST_FILENAME = "assist.request"
+ASSIST_RELEASE_FILENAME = "assist.release"
 
-def get_current_hostname() -> str:
-    """Return this run node's own hostname, for the `rdp_host` argument.
 
-    Convenience for building the `rdp_host` argument to
-    `wait_for_human_login()`/`jobstodo.set_human_wait()`: the toolkit's VNC
-    session needs to reach whichever machine is actually running this
-    process, wherever it was deployed - a config value would just be one
-    more thing to keep in sync with reality, and would drift the moment
-    machines are assigned dynamically per run rather than fixed (see
-    `rdp_host`'s own note in lib-odc-core-spec.md §4.2). Thin wrapper
-    around `socket.gethostname()`.
+def _atomic_write(path: Path, content: str) -> None:
+    """Write `content` to `path` via a temp-file-then-rename, so a reader
+    (Control Room's node agent) never observes a partially-written file.
 
-    Added in 0.8.7, when this mechanism was briefly built around RDP rather
-    than VNC (see `jobstodo`'s module-level comment and the 0.8.8 Change Log
-    entry) - kept unchanged by the 0.8.8 revert back to VNC, since a
-    hostname is exactly what a VNC session needs too, and this function's
-    own job (read `socket.gethostname()` instead of trusting a static,
-    driftable config value) never depended on which transport it fed.
+    The rename (`Path.replace()`) is atomic on the same filesystem - the
+    same guarantee `os.replace()` gives (`MoveFileEx` with
+    `MOVEFILE_REPLACE_EXISTING` on Windows, a single `rename()` syscall on
+    POSIX). This is a best-effort implementation of the atomicity
+    requirement flagged as unverified in
+    automation-odc-energia's docs/lib-odc-core-requirements.md item 6 - the
+    node agent's actual expectation (does it need this at all, or read a
+    direct write just fine) has not been confirmed.
     """
-    return socket.gethostname()
+    tmp_path = path.with_name(f".{path.name}.tmp{os.getpid()}")
+    tmp_path.write_text(content, encoding="utf-8")
+    tmp_path.replace(path)
 
 
-def get_current_session_id() -> int:
-    """Return this run node's own Windows session id, for the `session_id`
-    argument (written to the `rdp_sessionID` column - see `jobstodo`'s
-    module-level comment).
+def request_assist(job_id: str, reason: str, job_dir: Path | str) -> None:
+    """Signal Control Room's node agent that this job needs a human-assisted
+    login, by writing `assist.request` into `job_dir`. Non-blocking -
+    returns immediately once the file is written (or the write fails).
 
-    The toolkit builds the VNC join URL for a job's RDS host from
-    `5900 + session_id`, since a single host can run multiple sessions - it
-    has no way to know which one this bot's browser is actually running in
-    unless the bot tells it. Reads it live from the OS via
-    `kernel32.ProcessIdToSessionId()` (this process's own pid), the same
-    reasoning as `get_current_hostname()`/the pre-0.8.8
-    `get_current_windows_username()`: a config value would just be one more
-    thing to keep in sync, and would drift the moment a run lands in a
-    different session across runs (which it can - session ids are assigned
-    per logon, not fixed per machine).
+    Split out of the old single `wait_for_human_login()` call (which used
+    to both trigger the assist session and poll for login completion) so a
+    caller can invoke this *before* `page.goto()` navigates anywhere - the
+    node agent's own VNC/websockify provisioning is an unknown, possibly
+    non-trivial delay, so triggering it before the browser starts
+    navigating lets both overlap instead of happening strictly one after
+    the other. `wait_for_human_login()` below is the second half of this
+    handoff (unchanged otherwise: banner, confirm button, poll loop) - it
+    no longer triggers assist itself, this call already did. See
+    automation-odc-energia's docs/lib-odc-core-requirements.md item 1.
 
-    `ctypes` rather than `pywin32`/`win32ts.ProcessIdToSessionId()` - this
-    is a single stdlib call, not worth a new dependency for.
+    `job_dir` is the same per-run directory Control Room's own agent
+    already told this bot about at launch (e.g. `ctx.job_file.parent`,
+    where `ctx = automation_core.setup(...)` resolved it from
+    `--job-file`/`CR_JOB_FILE`) - lib-odc-core does not know or guess this
+    location itself, since Control Room decides it per run and could put
+    it anywhere; the caller supplies it explicitly, the same way every
+    other function here takes `dsn`/`tables` explicitly rather than
+    assuming a fixed location.
 
-    Raises `OSError` if the OS call itself fails (`ProcessIdToSessionId`
-    returns 0) - not expected on a real Windows run node, but this function
-    makes no attempt to guess a default if it happens.
+    Writes `{"reason": reason}` to a temp file in `job_dir`, then renames
+    it into place as `assist.request` (see `_atomic_write()`) - a
+    best-effort implementation of a protocol flagged as unverified against
+    Control Room's own docs (exact filename/schema/atomicity - see
+    docs/lib-odc-core-requirements.md item 6). Confirm before depending on
+    this in production.
+
+    Best-effort like every other infra-signal write this mechanism used to
+    make to the database: a failure (job_dir doesn't exist, permissions,
+    disk full) is logged, never raised - the browser-side flow still
+    proceeds either way, just without an assist session for a human to
+    join.
     """
-    session_id = ctypes.c_ulong()
-    pid = os.getpid()
-    if not ctypes.windll.kernel32.ProcessIdToSessionId(ctypes.c_ulong(pid), ctypes.byref(session_id)):
-        raise OSError(f"ProcessIdToSessionId failed for pid {pid}")
-    return session_id.value
-
-
-#: Base VNC port - the toolkit's own join-URL convention is 5900 + session_id,
-#: since a single machine can run more than one Windows session (and so more
-#: than one tvnserver instance) at once. See `jobstodo`'s module-level
-#: comment on `rdp_sessionID`.
-VNC_PORT_BASE = 5900
-
-#: Default budget for start_vnc_server()'s post-launch port poll.
-VNC_PORT_POLL_TIMEOUT_S = 10.0
-
-#: Seconds between port-open attempts while polling.
-VNC_PORT_POLL_INTERVAL_S = 0.5
-
-#: App Paths registry key TightVNC's own installer registers - the same
-#: place Explorer/`start`/ShellExecute resolve a bare "tvnserver" from.
-#: `subprocess.Popen`, unlike those, does NOT consult this - it only
-#: searches the current directory and PATH (confirmed live: a run node
-#: with TightVNC installed still raised FileNotFoundError from a bare
-#: `Popen(["tvnserver", "-run"])`), so _resolve_tvnserver_path() below
-#: reads it directly instead of assuming PATH is enough.
-_TVNSERVER_APP_PATHS_KEY = r"SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths\tvnserver.exe"
-
-#: Default install locations TightVNC's own installer offers - tried only
-#: after the registry and env var lookups below come up empty.
-_TVNSERVER_DEFAULT_PATHS = (
-    r"C:\Program Files\TightVNC\tvnserver.exe",
-    r"C:\Program Files (x86)\TightVNC\tvnserver.exe",
-)
-
-#: Per-user (HKCU, not machine-wide HKLM) registry key tvnserver reads its
-#: own settings from in "-run" (per-session) mode - confirmed by
-#: `-run`-mode config (password, auth) already living under this same key
-#: on a real machine. TightVNC does NOT automatically offset its listening
-#: port by Windows session id on its own - confirmed live: with no RfbPort
-#: value set, `-run` listened on the default 5900 regardless of which
-#: session launched it, and a poll of VNC_PORT_BASE + session_id (5908 for
-#: session 8) then timed out, exactly the failure mode this was found
-#: from. Writing RfbPort here before launching is what actually makes
-#: tvnserver listen where the toolkit's join-URL convention expects.
-_TVNSERVER_REGISTRY_KEY = r"Software\TightVNC\Server"
-
-
-def _set_tvnserver_port(port: int) -> None:
-    """Write `RfbPort` (a `REG_DWORD`) under `_TVNSERVER_REGISTRY_KEY` so
-    the next `tvnserver -run` actually listens on `port`, instead of its
-    configured/default port (5900 - TightVNC has no built-in notion of
-    "offset by session id" on its own).
-
-    Confirmed live: setting this to 5908 and then launching `tvnserver
-    -run` produced a listener on 5908, not 5900 - this is a genuine,
-    documented TightVNC setting, not a guess.
-
-    Best-effort: a failure here (e.g. no registry write permission) is
-    logged, not raised - `start_vnc_server()` still attempts the launch
-    regardless, just without a guaranteed-correct port in that case,
-    matching every other infra-readiness step in this flow.
-    """
+    request_path = Path(job_dir) / ASSIST_REQUEST_FILENAME
     try:
-        with winreg.CreateKeyEx(winreg.HKEY_CURRENT_USER, _TVNSERVER_REGISTRY_KEY) as key:
-            winreg.SetValueEx(key, "RfbPort", 0, winreg.REG_DWORD, port)
+        _atomic_write(request_path, json.dumps({"reason": reason}))
+        logger.info(
+            "HUMAN_IN_LOOP - wrote %s for job %s (reason: %r)",
+            request_path, job_id, reason,
+        )
     except OSError:
         logger.exception(
-            "HUMAN_IN_LOOP - could not set tvnserver's RfbPort registry value to %d",
-            port,
+            "HUMAN_IN_LOOP - could not write %s for job %s; continuing without "
+            "the Control Room assist signal", request_path, job_id,
         )
 
 
-def _stop_existing_tvnserver() -> None:
-    """Best-effort: stop any `tvnserver.exe` already running for this
-    session, so the next `-run` picks up a freshly-written `RfbPort` (see
-    `_set_tvnserver_port()`) instead of an already-running instance
-    silently keeping whatever port it started with.
+def release_assist(job_id: str, job_dir: Path | str) -> None:
+    """Signal Control Room's node agent that the human-assisted session for
+    this job is done, by writing `assist.release` (empty file) into
+    `job_dir`.
 
-    A second `-run` while one is already active is not enough on its own
-    to pick up a new port - confirmed live: invoking `-run` again while an
-    instance was already listening did not open a new listener on a
-    different configured port, it was simply a no-op. Stopping first is
-    what makes a fresh, correctly-configured instance actually start.
+    Called from `wait_for_human_login()`'s own `finally` block on every
+    exit - success, failure, timeout, or an exception raised from
+    `is_logged_in()` - the equivalent guarantee the old design got from a
+    Python `try`/`finally` around `jobstodo.clear_human_wait()`. Note the
+    limit that guarantee always had and still has: it only covers this
+    process exiting through its own Python call stack. A hard kill (crash,
+    SIGKILL, power loss) before this line runs writes nothing - closing
+    that gap needs Control Room's node agent to independently detect a
+    dead bot process, which is outside lib-odc-core's own reach. See
+    automation-odc-energia's docs/lib-odc-core-requirements.md item 4 -
+    confirm which side actually provides that guarantee before relying on
+    it in production.
 
-    `taskkill` here can only ever affect processes this same Windows
-    account owns, even with no extra scoping - a standard user process
-    cannot terminate another account's process regardless, so this cannot
-    reach across sessions/accounts on a shared host.
+    Best-effort: a failure to write is logged, never raised.
     """
+    release_path = Path(job_dir) / ASSIST_RELEASE_FILENAME
     try:
-        subprocess.run(
-            ["taskkill", "/F", "/IM", "tvnserver.exe"],
-            capture_output=True, check=False,
-        )
-    except Exception:
-        logger.debug(
-            "HUMAN_IN_LOOP - could not stop an existing tvnserver instance", exc_info=True,
-        )
-
-
-def _resolve_tvnserver_path() -> str:
-    """Best-effort resolution of tvnserver.exe's actual location on this
-    run node.
-
-    A bare `"tvnserver"` only resolves via `subprocess`/`CreateProcess`'s
-    own search (cwd, then `PATH`) - it does not consult the Windows "App
-    Paths" registry key the way `ShellExecute`/`start`/Explorer would, and
-    TightVNC's installer does not add itself to `PATH`. This was found live
-    on a run node with TightVNC genuinely installed: `start_vnc_server()`
-    raised `FileNotFoundError` from exactly that bare-name `Popen()` call.
-
-    Tries, in order:
-      1. the `ODC_TVNSERVER_PATH` environment variable - an explicit
-         override for a non-standard install location, same pattern as
-         `ODC_RDP_PASSWORD`'s env-var precedent elsewhere in this module's
-         history (a secret/path scoped to one machine, not team-wide
-         config).
-      2. the same App Paths registry key (`_TVNSERVER_APP_PATHS_KEY`)
-         Explorer/`start` would use - the mechanism TightVNC's installer is
-         *documented* to register itself under.
-      3. `_TVNSERVER_DEFAULT_PATHS`, TightVNC's own default install
-         locations.
-
-    Step 3 is not just a defensive fallback for "the registry key is
-    missing for some reason": confirmed live on a real dev machine with
-    TightVNC genuinely installed that the App Paths key was simply absent
-    (`winreg.OpenKey()` raised `FileNotFoundError`) while the default
-    install path resolved it correctly - so this step is doing real, load-
-    bearing work, not covering a hypothetical edge case.
-
-    Falls back to the bare `"tvnserver"` string if none of these resolve
-    to a real file - `subprocess.Popen()` then raises `FileNotFoundError`
-    exactly as before this existed, so a genuinely-not-installed node's
-    behaviour is unchanged.
-    """
-    env_path = os.environ.get("ODC_TVNSERVER_PATH", "").strip()
-    if env_path and os.path.isfile(env_path):
-        return env_path
-
-    try:
-        with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, _TVNSERVER_APP_PATHS_KEY) as key:
-            registry_path, _ = winreg.QueryValueEx(key, "")
-        if registry_path and os.path.isfile(registry_path):
-            return registry_path
+        _atomic_write(release_path, "")
+        logger.info("HUMAN_IN_LOOP - wrote %s for job %s", release_path, job_id)
     except OSError:
-        pass
-
-    for candidate in _TVNSERVER_DEFAULT_PATHS:
-        if os.path.isfile(candidate):
-            return candidate
-
-    return "tvnserver"
-
-
-def start_vnc_server(session_id: int, timeout_s: float = VNC_PORT_POLL_TIMEOUT_S) -> bool:
-    """Launch the TightVNC server for this session (`tvnserver -run`), then
-    poll its VNC port until it actually accepts a connection or timeout_s
-    elapses.
-
-    Call this before launching the browser for a human_in_loop=1 supplier -
-    the toolkit's join URL (`rdp_host`/`rdp_sessionID`, see `jobstodo`'s
-    module-level comment) is useless if nothing is actually listening on
-    that session's VNC port (`VNC_PORT_BASE + session_id`) yet.
-
-    `-run` starts tvnserver attached to this interactive session (as
-    opposed to `-install`, which registers it as a machine-wide service) -
-    the right mode here, since a VNC server needs to run inside the same
-    desktop session as the browser it's meant to expose, and this bot
-    already assumes an interactive session for that same reason (see
-    `main.py`'s own launch-time log message).
-
-    The executable itself is resolved via `_resolve_tvnserver_path()`, not
-    a bare `"tvnserver"` string - `subprocess.Popen()` only searches the
-    current directory and `PATH`, not the Windows "App Paths" registry key
-    TightVNC's installer actually registers itself under, which is why a
-    bare name reliably raised `FileNotFoundError` on a run node with
-    TightVNC genuinely installed (see that function's docstring for the
-    full resolution order).
-
-    Before launching, also writes the target port to the registry
-    (`_set_tvnserver_port()`) and stops any already-running instance for
-    this session (`_stop_existing_tvnserver()`). Both are necessary, not
-    defensive extras: TightVNC has no built-in notion of listening on
-    `VNC_PORT_BASE + session_id` on its own - confirmed live that, with no
-    `RfbPort` set, `-run` listens on the plain default (5900) regardless of
-    session, and a poll of the session-specific port then times out
-    (exactly the failure this was found from); and a second `-run` while
-    an instance is already active does not pick up a newly-written port,
-    it is simply a no-op, so a stale instance from an earlier attempt has
-    to be stopped first for the new setting to actually take effect.
-
-    Launching itself is fire-and-forget: `Popen`, not `run`, since
-    `tvnserver -run` is a long-lived process that keeps serving VNC
-    connections for the rest of this session - waiting for it to exit (what
-    `run()` does) would hang here indefinitely. What this function does
-    wait for, briefly, is the port actually coming up: `-run` returns
-    control to this process before tvnserver has necessarily finished
-    initialising and started listening, so polling closes that gap rather
-    than assuming the port is immediately ready the instant `Popen()`
-    returns.
-
-    Best-effort and non-fatal throughout, like every other infra-readiness
-    step in this flow (e.g. `browser_helpers`'s own screenshot/banner
-    failures, or a `set_human_wait()` DB write failing): a launch failure
-    (TightVNC not installed, `tvnserver` not resolvable) or a port that
-    never opens within timeout_s is logged, never raised, so the browser
-    launch still proceeds - the human-assisted wait will simply have no
-    VNC session for a human to join yet.
-
-    Returns True if the port was confirmed open within timeout_s, False
-    otherwise (launch failure, or the port simply never came up in time) -
-    a caller may use this to log more loudly, but should not treat False as
-    fatal.
-    """
-    port = VNC_PORT_BASE + session_id
-    tvnserver_path = _resolve_tvnserver_path()
-
-    _set_tvnserver_port(port)
-    _stop_existing_tvnserver()
-
-    try:
-        subprocess.Popen([tvnserver_path, "-run"])
-    except Exception:
         logger.exception(
-            "HUMAN_IN_LOOP - could not start tvnserver (resolved path: %r) - "
-            "continuing without it (the human-assisted wait will have no VNC "
-            "session to join)",
-            tvnserver_path,
+            "HUMAN_IN_LOOP - could not write %s for job %s", release_path, job_id,
         )
-        return False
-
-    logger.info(
-        "HUMAN_IN_LOOP - started tvnserver -run for this session, waiting up to "
-        "%ss for port %d to open",
-        timeout_s, port,
-    )
-    deadline = time.monotonic() + timeout_s
-    while time.monotonic() < deadline:
-        try:
-            with socket.create_connection(("127.0.0.1", port), timeout=VNC_PORT_POLL_INTERVAL_S):
-                logger.info("HUMAN_IN_LOOP - VNC port %d is open", port)
-                return True
-        except OSError:
-            time.sleep(VNC_PORT_POLL_INTERVAL_S)
-
-    logger.warning(
-        "HUMAN_IN_LOOP - VNC port %d did not open within %ss of starting tvnserver - "
-        "continuing without a confirmed VNC session",
-        port, timeout_s,
-    )
-    return False
-
-
-def prepare_vnc_session(
-    human_in_loop_flag: object,
-    timeout_s: float = VNC_PORT_POLL_TIMEOUT_S,
-) -> tuple[str, int] | None:
-    """Generic pre-browser-launch step for any human_in_loop=1 supplier -
-    the one call a supplier project needs instead of hand-rolling the
-    `human_in_loop` check and the `get_current_hostname()`/
-    `get_current_session_id()`/`start_vnc_server()` sequence itself.
-
-    `human_in_loop_flag` is the caller's job row's own `human_in_loop`
-    value (e.g. `row["human_in_loop"]`, from `jobstodo.get_job_details()` -
-    see that function's docstring and spec §4.3) - a nullable `tinyint` as
-    it comes out of `ODC_suppliers`, so this accepts anything truthy/falsy
-    rather than requiring a `bool` specifically.
-
-    Falsy: returns `None` immediately - this job's supplier doesn't need a
-    human-assisted session, so there's nothing to prepare.
-
-    Truthy: resolves this run node's own `rdp_host`/`session_id`
-    (`get_current_hostname()`/`get_current_session_id()`) and starts the
-    VNC server for this session (`start_vnc_server()`, which polls its own
-    port before returning), then returns `(rdp_host, session_id)` - hold
-    onto both and pass them to `wait_for_human_login()` later, once the
-    caller's own browser has actually launched.
-
-    **Must be called before launching the browser** - that ordering is the
-    entire point: the VNC session needs to be confirmed listening first,
-    not started in a race with (or after) the browser.
-    """
-    if not human_in_loop_flag:
-        return None
-
-    rdp_host = get_current_hostname()
-    session_id = get_current_session_id()
-    start_vnc_server(session_id, timeout_s=timeout_s)
-    return rdp_host, session_id
 
 
 #: Seconds between poll ticks while waiting for the human.
@@ -376,11 +168,10 @@ POLL_INTERVAL_S = 1.5
 HEARTBEAT_INTERVAL_S = 20
 
 #: Pause after the wait ends successfully, before this function returns.
-#: Doubles as the human's moment to read the "taking over" banner and stop
-#: interacting, and as the window during which human_wait_status reads
-#: COMPLETE (see jobstodo.set_human_wait_complete()) before clear_human_wait()
-#: nulls it - long enough for a poller's toolkit to observe COMPLETE and
-#: disconnect the VNC session before the signal disappears entirely.
+#: The human's moment to read the "taking over" banner and stop
+#: interacting, while the assist session is still live - release_assist()
+#: (in the finally below) only runs after this sleep, so the VNC session
+#: isn't torn out from under a human still reading the banner.
 TAKEOVER_PAUSE_S = 5
 
 _BANNER_COLOR_STARTED = "#2980b9"   # blue - informational, process beginning
@@ -606,69 +397,61 @@ def wait_for_human_login(
     page: Any,
     is_logged_in: Callable[[Any], bool],
     job_id: str,
+    job_dir: Path | str,
     timeout_s: int,
-    rdp_host: str,
-    session_id: int,
-    tables: dict,
-    dsn: str,
     config: dict,
     started_message: str = DEFAULT_STARTED_MESSAGE,
 ) -> bool:
-    """Run a human-assisted login: DB signal, on-page banner/button, poll loop.
+    """Run the blocking half of a human-assisted login: on-page banner,
+    confirm button, poll loop - then release the assist session on every
+    exit path via `release_assist()`.
 
-    Assumes `page` is already sitting on (or navigating to) the login page a
-    human needs to complete by hand - this function does not navigate there
-    itself, since portal navigation and cookie-banner dismissal are the
-    caller's own concern (each supplier's portal differs).
+    Assumes the caller already called `request_assist()` earlier (before
+    `page.goto()` - see that function's docstring for why) and that `page`
+    is already sitting on (or navigating to) the login page a human needs
+    to complete by hand - this function does not navigate there itself,
+    since portal navigation and cookie-banner dismissal are the caller's
+    own concern (each supplier's portal differs). This function no longer
+    triggers assist itself. See automation-odc-energia's
+    docs/lib-odc-core-requirements.md item 1 for why the old single call
+    was split into these two.
+
+    0.8.12: dropped the `rdp_host`/`session_id`/`tables`/`dsn` parameters
+    this function used to take - the ODC_jobs human_wait_status/rdp_host/
+    rdp_sessionID DB signal this function used to write via
+    `jobstodo.set_human_wait()`/`set_human_wait_complete()`/
+    `clear_human_wait()` is gone entirely (inse-toolkit no longer reads
+    those columns - it polls Control Room's own job record instead, fed by
+    the assist.request/assist.release files `request_assist()`/
+    `release_assist()` now write). Added `job_dir`, needed by
+    `release_assist()`. See `jobstodo.py`'s module-level comment and
+    automation-odc-energia's docs/lib-odc-core-requirements.md item 2.
 
     `started_message` is the banner text shown while waiting (default:
     DEFAULT_STARTED_MESSAGE, generic across every human_in_loop supplier).
     Override it with something specific to what the human actually needs to
     do on this portal - e.g. "Please resolve the reCAPTCHA challenge, then
     click 'I'm logged in'" - rather than this library guessing at
-    portal-specific wording. Added as a trailing, defaulted argument so
-    existing positional call sites keep working unchanged.
-
-    0.8.8: dropped the `rdp_username`/`rdp_password` parameters this
-    function briefly took (0.8.1-0.8.7) - this mechanism reverted from RDP
-    back to VNC, which needs only `rdp_host` to connect. See `jobstodo`'s
-    module-level comment and the 0.8.8 Change Log entry for why.
-
-    0.8.9: added `session_id` - the toolkit builds a job's VNC join URL as
-    `5900 + session_id`, since a single `rdp_host` can run more than one
-    Windows session at once and has no other way to tell which one this
-    bot's browser is actually in. See `human_in_loop.get_current_session_id()`
-    and `jobstodo`'s module-level comment for where this is stored.
+    portal-specific wording.
 
     Sequence:
-      1. jobstodo.set_human_wait() - writes human_wait_status=PENDING_HUMAN
-         plus the VNC host and session id, the cue for a poller's toolkit
-         to open the VNC session.
-      2. Injects the "I'm logged in - continue automation" button and the
+      1. Injects the "I'm logged in - continue automation" button and the
          on-page banner, then polls every POLL_INTERVAL_S (up to timeout_s)
          until the button is clicked - the sole trigger for success. See
          _poll_until_logged_in()'s docstring for why `is_logged_in(page)` is
          diagnostic-only here rather than an equal, independent trigger.
-      3. On success: shows a "taking over" banner, clears the confirm
-         button, calls jobstodo.set_human_wait_complete() (writes
-         human_wait_status=COMPLETE - the cue for the toolkit to disconnect
-         - and touches nothing else: rdp_host/session_id are left exactly as
-         set_human_wait() wrote them), then sleeps TAKEOVER_PAUSE_S before
-         returning True, giving the human a moment to read the banner and
-         stop interacting. jobstodo.clear_human_wait() is deliberately NOT
-         called on this path (see step 4), so a poller can observe COMPLETE
-         - and the VNC host/session a completed job used - for as long as
-         it needs rather than racing a fixed window.
-      4. jobstodo.clear_human_wait() runs in a finally, but only fires when
-         `success` is False - a genuine failure, a timeout, or an exception
-         raised from `is_logged_in()`/the poll loop. Those paths have
-         nothing worth keeping, so the row is fully reset to NULL rather
-         than left at PENDING_HUMAN.
-      5. On timeout instead of success: shows a "no response" banner, logs,
+      2. On success: shows a "taking over" banner, clears the confirm
+         button, sleeps TAKEOVER_PAUSE_S (giving the human a moment to read
+         the banner and stop interacting, while the assist session is
+         still live), then returns True.
+      3. On timeout instead of success: shows a "no response" banner, logs,
          and takes an error screenshot (browser_helpers.take_error_screenshot),
-         then returns False. set_human_wait_complete() is never called on
-         this path - a poller must never read COMPLETE for a login that
-         didn't actually succeed.
+         then returns False.
+      4. `release_assist(job_id, job_dir)` runs in a `finally`, regardless
+         of which path was taken above - including an exception propagating
+         from `is_logged_in()`/the poll loop. See that function's docstring
+         for the limits of this guarantee (it cannot cover a hard kill of
+         this process).
 
     `is_logged_in(page) -> bool` is the caller's own, portal-specific check
     (e.g. a post-login URL/DOM marker) - this function has no way to know
@@ -679,23 +462,10 @@ def wait_for_human_login(
     candidate marker's timing against the button click before ever trusting
     it further. It must still be defensive: an exception it raises
     propagates out of this function (past the button/banner logic, though
-    clear_human_wait() in the finally still runs) and ends the wait early.
+    release_assist() in the finally still runs) and ends the wait early.
     See automation-odc-energia's `_post_login_reached()` for a reference
     implementation.
-
-    Failures writing the ODC_jobs signal (e.g. the human_wait_status/rdp_*
-    columns don't exist yet on this database) are logged and swallowed, not
-    fatal to the run - the browser-side wait still proceeds either way. See
-    lib-odc-core-spec.md §4.2.
     """
-    try:
-        jobstodo.set_human_wait(job_id, timeout_s, rdp_host, session_id, tables, dsn)
-    except Exception:
-        logger.exception(
-            "HUMAN_IN_LOOP - could not set human_wait_status for job %s; continuing "
-            "without the Control Room/VNC signal", job_id,
-        )
-
     success = False
     try:
         success = _poll_until_logged_in(page, is_logged_in, timeout_s, started_message)
@@ -711,13 +481,6 @@ def wait_for_human_login(
                 _BANNER_COLOR_TAKEOVER,
             )
             _clear_login_confirm_button(page)
-            try:
-                jobstodo.set_human_wait_complete(job_id, tables, dsn)
-            except Exception:
-                logger.exception(
-                    "HUMAN_IN_LOOP - could not set human_wait_status=COMPLETE for "
-                    "job %s", job_id,
-                )
             time.sleep(TAKEOVER_PAUSE_S)
             logger.info("HUMAN_IN_LOOP - resuming automated control for job %s", job_id)
         else:
@@ -732,17 +495,6 @@ def wait_for_human_login(
                 _BANNER_COLOR_TIMEOUT,
             )
     finally:
-        # Only a non-success exit (failure, timeout, or an exception from
-        # is_logged_in()/the poll loop) clears the row back to NULL. On
-        # success, human_wait_status is left at COMPLETE deliberately - see
-        # set_human_wait_complete()'s docstring for why it persists rather
-        # than being cleared moments later.
-        if not success:
-            try:
-                jobstodo.clear_human_wait(job_id, tables, dsn)
-            except Exception:
-                logger.exception(
-                    "HUMAN_IN_LOOP - could not clear human_wait_status for job %s", job_id,
-                )
+        release_assist(job_id, job_dir)
 
     return success

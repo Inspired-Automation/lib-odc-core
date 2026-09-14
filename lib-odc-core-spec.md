@@ -93,7 +93,7 @@ env: dev
 | `sugar_client` | `dsn` only (passed directly) |
 | `graph_client` | `config["graph"]` |
 | `browser_helpers` | `config["delays"]`, plus `_logs_dir`/`_process_id`/`_supplier_name` for screenshots |
-| `human_in_loop` | `tables`, `dsn` (passed directly, delegated to `jobstodo`); `config` only for `browser_helpers.take_error_screenshot()` on timeout - same keys as `browser_helpers` above |
+| `human_in_loop` | no `tables`/`dsn` (0.8.12 - it no longer touches `ODC_jobs`); `job_dir` (a `Path`, passed directly - the bot's own per-run job directory, e.g. `ctx.job_file.parent`); `config` only for `browser_helpers.take_error_screenshot()` on timeout - same keys as `browser_helpers` above |
 | `pdf_auto_copy` | `config["env"]`, `config["pdf_auto"]["base_path"]` |
 | `validate_username` | nothing |
 
@@ -141,10 +141,15 @@ get_job_details(process_id: str, job_id: str, tables: dict, dsn: str) -> list[di
 get_multi_credentials(client_id: str, supplier_id: str, tables: dict, dsn: str) -> list[dict]
 revert_to_pending(job_detail_id: str, tables: dict, dsn: str) -> None
 clear_job_claim(job_id: str, tables: dict, dsn: str) -> None
-set_human_wait(job_id: str, timeout_s: int, rdp_host: str, session_id: int, tables: dict, dsn: str) -> None
-set_human_wait_complete(job_id: str, tables: dict, dsn: str) -> None
-clear_human_wait(job_id: str, tables: dict, dsn: str) -> None
 ```
+
+`set_human_wait()`/`set_human_wait_complete()`/`clear_human_wait()` (added
+0.8.0-0.8.1, the job-level human-assisted-login signal on `ODC_jobs`) were
+**removed entirely in 0.8.12**, not deprecated - inse-toolkit switched fully
+to polling Control Room's own job record, fed by a file-based
+`assist.request`/`assist.release` protocol instead (§3.2a, §4.2). The four
+`ODC_jobs` columns they wrote (`human_wait_status`, `human_wait_deadline`,
+`rdp_host`, `rdp_sessionID`) were dropped via DDL the same day - see §4.2.
 
 `get_job_details()` stamps `ODC_jobs.process_id` **before** reading
 `ODC_job_details`, so two concurrent runs of the same job cannot both claim it.
@@ -163,86 +168,65 @@ joined `ODC_jobs` and `ODC_job_details` columns keyed by column name, plus
 A `job_details` row with no matching `scrape_accounts` row is excluded from
 the result.
 
-`set_human_wait()`/`set_human_wait_complete()`/`clear_human_wait()` (the
-first and last added 0.8.0, an `rdp_host` param on `set_human_wait()` and
-`set_human_wait_complete()` itself added 0.8.1) write a job-level
-"waiting for a human-assisted login" signal to `ODC_jobs` - see §4.2. This
-is a separate concern from the `ODC_job_details.status` vocabulary in §4.1:
-that vocabulary is per-account and only meaningful once a supplier's
-`search()` starts, whereas a human-assisted login wait happens once per
-job, before any account is individually processed.
-
-`human_wait_status` moves through these states: `NULL` ->
-`HUMAN_WAIT_PENDING` (`"PENDING_HUMAN"`) -> `HUMAN_WAIT_COMPLETE`
-(`"COMPLETE"`, terminal) on success, or directly back to `NULL` on a
-failure/timeout exit (`HUMAN_WAIT_COMPLETE` is never written on that path).
-`set_human_wait()` writes `HUMAN_WAIT_PENDING` and computes
-`human_wait_deadline` from `SYSUTCDATETIME()` on the database server, so a
-caller passes the same `timeout_s` its own wait loop uses and the two can
-never drift apart. It also writes the machine (`rdp_host`) the poller's
-toolkit needs to open the VNC session behind the login view - the
-human-assisted flow the signal exists for cannot connect without it, so
-this is a required, not optional, argument. `rdp_username`/`rdp_password`
-no longer exist on `ODC_jobs` at all (0.8.8 dropped both via DDL, on both
-`Titan_INSE_DEV` and the live `Titan_INSE`). `session_id` - the run node's
-own Windows session id - is also a required argument (0.8.9), written to a
-new `rdp_sessionID` column, since the toolkit needs it to build the job's
-VNC join URL as `5900 + session_id` (a single `rdp_host` can run more than
-one session). See the naming note in §4.2.
-
-Detecting that the human has actually finished logging in is the caller's
-own concern, not this library's - e.g. an in-page confirm button or a
-post-login URL check polled from the caller's own wait loop. Most callers
-should not call `set_human_wait()`/`set_human_wait_complete()`/
-`clear_human_wait()` directly at all - see `human_in_loop.wait_for_human_login()`
-(§3.2a), which wraps all three around exactly this kind of poll loop. Once a
-wait loop confirms success, it calls `set_human_wait_complete()`, which
-writes `HUMAN_WAIT_COMPLETE` and touches nothing else (0.8.5) - `rdp_host`
-and `human_wait_deadline` are left exactly as `set_human_wait()` wrote
-them, so a poller or an audit trail can see which machine a completed job
-used. The status change to `COMPLETE` is itself the cue for the toolkit to
-disconnect the VNC session.
-`HUMAN_WAIT_COMPLETE` is a **deliberately persistent terminal state**
-(0.8.4) - a caller must **not** also call `clear_human_wait()` immediately
-after a success, since that would erase the very signal a poller is meant
-to observe, and there is no fixed time budget for it to do so. Only a
-failure or timeout exit calls `clear_human_wait()`, resetting the row
-straight to `NULL` from `HUMAN_WAIT_PENDING` without ever writing
-`HUMAN_WAIT_COMPLETE` - there was nothing worth keeping on that path. A
-poller must never read `HUMAN_WAIT_COMPLETE` for a login that didn't
-actually succeed; a caller with its own reason to eventually reset a
-completed row back to `NULL` (once its downstream consumer has finished
-reacting, say) may still call `clear_human_wait()` itself for that, just
-not as an automatic follow-up to `set_human_wait_complete()`.
-
-Neither `set_human_wait()`, `set_human_wait_complete()`, nor
-`clear_human_wait()` raises on its own for a missing column - if the
-`ODC_jobs` schema change in §4.2 has not been applied to a given database
-yet, the underlying `pyodbc.Error` propagates like any other query error,
-and callers should treat that as "no signal support on this database yet"
-rather than a fatal condition.
-
 ### 3.2a `human_in_loop` - the generalised human-assisted-login mechanism
 
 ```python
+request_assist(job_id: str, reason: str, job_dir: Path | str) -> None
+release_assist(job_id: str, job_dir: Path | str) -> None
+
 wait_for_human_login(
     page: Any,
     is_logged_in: Callable[[Any], bool],
     job_id: str,
+    job_dir: Path | str,
     timeout_s: int,
-    rdp_host: str,
-    session_id: int,
-    tables: dict,
-    dsn: str,
     config: dict,
     started_message: str = DEFAULT_STARTED_MESSAGE,
 ) -> bool
-
-get_current_hostname() -> str
-get_current_session_id() -> int
-start_vnc_server(session_id: int, timeout_s: float = VNC_PORT_POLL_TIMEOUT_S) -> bool
-prepare_vnc_session(human_in_loop_flag: object, timeout_s: float = VNC_PORT_POLL_TIMEOUT_S) -> tuple[str, int] | None
 ```
+
+**0.8.12 re-architected this mechanism entirely**, per
+`automation-odc-energia`'s `docs/lib-odc-core-requirements.md`. Control
+Room now has its own native "assist" feature (a node agent resident on
+each automation host) that provisions and tears down a human-assisted VNC
+session on its own - this library's job is only to trigger it and to
+signal when it's no longer needed, via a small file-based protocol (§4.2),
+not to provision anything itself. Everything below describes the current
+design; see CLAUDE.md's Change Log and Known Gotchas for the superseded
+`ODC_jobs`-signal/tvnserver-launching design this replaced (removed
+entirely, not deprecated - `get_current_hostname()`, `get_current_session_id()`,
+`start_vnc_server()`, and `prepare_vnc_session()` no longer exist).
+
+The old single `wait_for_human_login()` call used to both signal "need a
+human" and block polling for login completion - which made it impossible
+to trigger the signal early (before `page.goto()` navigates anywhere)
+without also blocking on a not-yet-navigated page. It is now two calls:
+
+- **`request_assist(job_id, reason, job_dir)`** - non-blocking. Writes
+  `assist.request` (`{"reason": reason}`, via a temp-file-then-rename - see
+  §4.2) into `job_dir`, signalling Control Room's node agent to provision a
+  human-assisted VNC session. Safe, and intended, to call **before**
+  `page.goto()` - the node agent's own provisioning (an unknown, possibly
+  non-trivial delay) then overlaps with the browser's own navigation and
+  cookie-banner handling instead of happening strictly after it. Failures
+  (job_dir doesn't exist, permissions, disk full) are logged and swallowed,
+  never raised - the browser-side flow still proceeds either way, just
+  without an assist session for a human to join.
+- **`wait_for_human_login(...)`** - unchanged otherwise from the previous
+  design (banner, confirm button, poll loop - see below), but no longer
+  triggers assist itself; that already happened via `request_assist()`.
+  Calls `release_assist(job_id, job_dir)` in its own `finally` on every
+  exit path instead of writing to `ODC_jobs`.
+
+`job_dir` (both functions) is the bot's own per-run job directory - the
+same one Control Room's own agent already told the bot about at launch
+(e.g. `ctx.job_file.parent`, where `ctx = automation_core.setup(...)`
+resolved it from `--job-file`/`CR_JOB_FILE`; the same directory `lib-core`
+already writes a `cr_errors.json` sidecar into). This library does not
+resolve or guess this path itself - Control Room decides it per run and
+could put it anywhere, so the caller supplies it explicitly, the same
+philosophy as `dsn`/`tables` being caller-supplied everywhere else in this
+package.
 
 `started_message` (0.8.4, trailing/defaulted - existing positional call
 sites are unaffected) is the banner text shown while waiting, default
@@ -255,125 +239,29 @@ portal-specific wording. Only the *started* banner is overridable this way;
 the "taking over" and "no response" banners stay fixed, generic text, since
 neither references anything portal-specific.
 
-`get_current_hostname()` (0.8.7) builds the `rdp_host` argument above from
-this run node's own `socket.gethostname()`: the toolkit's VNC session needs
-to reach whichever machine is actually running this process, wherever it
-was deployed, so a config value would just be one more thing to keep in
-sync and would drift once machines are assigned dynamically per run.
-`automation-odc-energia`'s `main.py` had been calling `socket.gethostname()`
-inline since before this existed - centralised here for consistency, not
-because the inline call was wrong.
-
-0.8.8 removed `get_current_windows_username()` (0.8.4) and
-`get_rdp_password()` (0.8.6) entirely, along with the `rdp_username`/
-`rdp_password` arguments they built: this mechanism was briefly (0.8.1-0.8.7)
-built around RDP, which needs a username and password to connect, before it
-turned out the actual toolkit connects over VNC, which needs only a host.
-See §4.2's naming note and the 0.8.8 Change Log entry in `CLAUDE.md`.
-
-`get_current_session_id()` (0.8.9) builds the `session_id` argument above
-from this run node's own Windows session id, read via a single `ctypes`
-call to `kernel32.ProcessIdToSessionId()` on this process's own pid - no
-new dependency (`pywin32`/`win32ts` would have been one for a single call).
-The toolkit needs this to build a job's VNC join URL as
-`5900 + session_id`: `rdp_host` alone isn't enough once a single machine
-can run more than one session at a time. Written to the new
-`rdp_sessionID` column (`INT`) - see §4.2's naming note.
-
-`start_vnc_server(session_id, timeout_s=VNC_PORT_POLL_TIMEOUT_S)` (0.8.9) -
-the actual VNC session the `rdp_host`/`rdp_sessionID` signal points a
-poller's toolkit at. The executable path is resolved via
-`_resolve_tvnserver_path()` (0.8.10), not a bare `"tvnserver"` string -
-`subprocess.Popen()` only searches the current directory and `PATH`, not
-the Windows "App Paths" registry key an installer like TightVNC's actually
-registers itself under, so a bare name reliably raised `FileNotFoundError`
-on a run node with TightVNC genuinely installed. Resolution order: the
-`ODC_TVNSERVER_PATH` environment variable, then that App Paths registry
-key, then TightVNC's own default install locations (`C:\Program
-Files\TightVNC\tvnserver.exe` / the `(x86)` variant) - falling back to the
-bare `"tvnserver"` string (and thus the original `FileNotFoundError`
-behaviour) only if none of those resolve to a real file. Confirmed live
-that the registry step alone is not sufficient even on a genuine install:
-a real dev machine had TightVNC installed but no App Paths key at all, so
-the default-path fallback is load-bearing, not just defensive.
-
-Before launching, also configures the actual VNC port (0.8.11):
-`_set_tvnserver_port(port)` writes `RfbPort` (a `REG_DWORD`) under
-`HKCU\Software\TightVNC\Server`, and `_stop_existing_tvnserver()` stops any
-already-running `tvnserver.exe` for this session first. Both are
-necessary, not defensive extras - confirmed live, with real (unmocked)
-calls on a real dev machine: with no `RfbPort` set, `-run` always listened
-on the plain default port (5900) regardless of session, so a poll of
-`VNC_PORT_BASE + session_id` reliably timed out; and a second `-run` while
-an instance is already active does not pick up a freshly-written port on
-its own, it's simply a no-op, so a stale instance has to be stopped first
-for a new port setting to actually take effect. `taskkill` here can only
-ever affect processes this same account owns - Windows itself prevents a
-standard user process reaching across accounts/sessions on a shared host.
-
-Launching itself is fire-and-forget: `tvnserver -run` via
-`subprocess.Popen`, not `run` - the server is a long-lived process, not
-something to wait for. `-run` returns control before tvnserver has
-necessarily finished starting, though, so this function then polls
-`127.0.0.1:VNC_PORT_BASE + session_id` (`VNC_PORT_BASE = 5900`, matching the
-toolkit's own join-URL convention) every `VNC_PORT_POLL_INTERVAL_S` (0.5s)
-until it accepts a connection or `timeout_s` (default `VNC_PORT_POLL_TIMEOUT_S`,
-10s) elapses, so a caller knows the session is actually reachable rather
-than merely "probably starting up". A caller should invoke this for any
-`human_in_loop=1` supplier, before launching the browser, so the server is
-confirmed listening by the time a human needs to join. Logs and swallows a
-launch failure (e.g. TightVNC not installed, or `tvnserver` not resolvable)
-or a port that never opens in time, rather than raising - matches every
-other infra-readiness step in this flow (the `ODC_jobs` signal writes are
-equally best-effort): the browser-side wait still proceeds either way,
-just with no confirmed VNC session for a human to actually reach. Returns
-`True` if the port was confirmed open within `timeout_s`, `False`
-otherwise - informational for a caller that wants to log more loudly, not
-something to treat as fatal.
-
-`prepare_vnc_session(human_in_loop_flag, timeout_s=VNC_PORT_POLL_TIMEOUT_S)`
-(0.8.9) is the single, fully generic pre-browser-launch step for **any**
-`human_in_loop=1` supplier - the one call a caller needs instead of
-hand-rolling the `human_in_loop` check plus the `get_current_hostname()`/
-`get_current_session_id()`/`start_vnc_server()` sequence itself.
-`human_in_loop_flag` is the caller's own job row's `human_in_loop` value
-(e.g. `row["human_in_loop"]` from `jobstodo.get_job_details()` - §3.2/§4.3)
-- a nullable `tinyint` as it comes out of `ODC_suppliers`, so this accepts
-anything truthy/falsy, not strictly a `bool`. Falsy: returns `None`
-immediately, nothing to prepare. Truthy: resolves `rdp_host`/`session_id`
-and starts (and confirms) the VNC server exactly as `start_vnc_server()`
-does, then returns `(rdp_host, session_id)` for the caller to hold onto
-and pass to `wait_for_human_login()` later, once its own browser has
-actually launched. **Must be called before that browser launch** - the
-whole reason this exists as a distinct, earlier call rather than folded
-into `wait_for_human_login()` itself, which only runs once `page` already
-exists.
-
 Added 0.8.1, generalised out of `automation-odc-energia`'s Phase 3 (see
-`docs/energia-human-assisted-login-control-room-contract.md` in that repo,
-which predates this generalisation and still describes a bespoke,
-Energia-only implementation). For any supplier flagged by
-`ODC_suppliers.human_in_loop` (surfaced as the `human_in_loop` column on
-every row `jobstodo.get_job_details()` returns - §3.2), this is the one
-call a supplier project needs instead of hand-rolling the banner/button/poll
-loop and the `jobstodo.set_human_wait()`/`set_human_wait_complete()`/
-`clear_human_wait()` sequencing itself.
+`docs/energia-human-assisted-login-control-room-contract.md` in that repo).
+For any supplier flagged by `ODC_suppliers.human_in_loop` (surfaced as the
+`human_in_loop` column on every row `jobstodo.get_job_details()` returns -
+§3.2), `request_assist()`/`wait_for_human_login()` are the two calls a
+supplier project needs instead of hand-rolling the file protocol and the
+banner/button/poll loop itself.
 
 `page` is assumed to already be sitting on (or navigating to) the login page
-- this function does not navigate there itself, since portal navigation and
-cookie-banner dismissal (see `browser_helpers.dismiss_cookie_banner()`) are
-each supplier's own concern. `is_logged_in(page) -> bool` is the one
-genuinely supplier-specific piece this function cannot provide: a check for
-whatever marks a successful login on that particular portal (a URL change,
-a dashboard element, etc.). **It does not end the wait on its own** (0.8.2 -
-see below); it is called every poll tick and must be defensive regardless -
-an exception it raises propagates out of `wait_for_human_login()` itself
-(ending the wait early, though `clear_human_wait()` still runs).
+- `wait_for_human_login()` does not navigate there itself, since portal
+navigation and cookie-banner dismissal (see
+`browser_helpers.dismiss_cookie_banner()`) are each supplier's own concern.
+`is_logged_in(page) -> bool` is the one genuinely supplier-specific piece
+this function cannot provide: a check for whatever marks a successful
+login on that particular portal (a URL change, a dashboard element, etc.).
+**It does not end the wait on its own** (0.8.2 - see below); it is called
+every poll tick and must be defensive regardless - an exception it raises
+propagates out of `wait_for_human_login()` itself (ending the wait early,
+though `release_assist()` in the `finally` still runs).
 
-What it does, end to end:
+What `wait_for_human_login()` does, end to end:
 
-1. `jobstodo.set_human_wait(job_id, timeout_s, rdp_host, session_id, tables, dsn)`.
-2. Injects a fixed "I'm logged in - continue automation" button (a DOM
+1. Injects a fixed "I'm logged in - continue automation" button (a DOM
    attribute - `element.dataset.confirmed` - read back via `page.evaluate()`
    each tick; not `page.expose_function()`, and not a `window.*` global -
    see the module's own comments above `_LOGIN_CONFIRM_BUTTON_JS` for why:
@@ -390,35 +278,27 @@ What it does, end to end:
    taking over while the human was still mid-task - found in live testing
    against `automation-odc-energia`, fixed in 0.8.2. The explicit button
    click has no such ambiguity.
-3. On success: shows a "taking over" banner, clears the confirm button,
-   calls `jobstodo.set_human_wait_complete()`, then sleeps 5s
-   (`TAKEOVER_PAUSE_S`) before returning `True`, giving the human a moment
-   to stop interacting with the page. `human_wait_status` is left at
-   `COMPLETE` - `jobstodo.clear_human_wait()` is deliberately **not**
-   called on this path (0.8.4 - see below), so a poller can observe
-   `COMPLETE` for as long as it needs, not race a fixed window before it
-   disappears.
-4. `jobstodo.clear_human_wait()` runs in a `finally`, but only fires when
-   the wait did **not** succeed - a failure, a timeout, or an exception
-   from `is_logged_in()`/the poll loop. Those paths reset the row straight
-   to `NULL` (`HUMAN_WAIT_COMPLETE` is never written on them at all).
-   Before 0.8.4, this ran unconditionally, which meant a successful wait's
-   `COMPLETE` was cleared back to `NULL` moments later regardless - found
-   in live testing to be too narrow a window for a poller to reliably
-   observe `COMPLETE` before it vanished, and now treated as a genuine
-   persistent terminal state instead. A caller with its own reason to
-   eventually reset a completed row may still call `clear_human_wait()`
-   itself later - it's just no longer automatic.
-5. On timeout (no success within `timeout_s`): shows a "no response"
+2. On success: shows a "taking over" banner, clears the confirm button,
+   then sleeps 5s (`TAKEOVER_PAUSE_S`) before returning `True`, giving the
+   human a moment to read the banner and stop interacting while the assist
+   session is still live - `release_assist()` (step 4 below) only runs
+   after this sleep, so the VNC session isn't torn out from under a human
+   still reading the banner.
+3. On timeout (no success within `timeout_s`): shows a "no response"
    banner, logs, and takes an error screenshot via
    `browser_helpers.take_error_screenshot()`, then returns `False`.
-   `set_human_wait_complete()` is never called on this path - a poller must
-   never read `HUMAN_WAIT_COMPLETE` for a login that didn't succeed.
-
-Failures writing the `ODC_jobs` signal at any of the three steps above are
-logged and swallowed, not fatal to the run, matching §4.2's "no signal
-support on this database yet" tolerance - the browser-side wait still
-proceeds regardless of whether the DB signal succeeded.
+4. `release_assist(job_id, job_dir)` runs in a `finally`, regardless of
+   which path above was taken - including an exception propagating from
+   `is_logged_in()`/the poll loop. This is the equivalent guarantee the
+   previous design got from a `finally` around `jobstodo.clear_human_wait()`
+   - but note the limit that guarantee always had and still has: it only
+   covers this process exiting through its own Python call stack. A hard
+   kill (crash, `SIGKILL`, power loss) before that line runs writes
+   nothing - closing that gap needs Control Room's node agent to
+   independently detect a dead bot process, which is outside this
+   library's own reach and, as of 0.8.12, unconfirmed either way (see
+   `docs/lib-odc-core-requirements.md` item 4 and CLAUDE.md Known
+   Gotchas).
 
 ### 3.3 `duplicate_check` - pre-download guard
 
@@ -619,7 +499,7 @@ callers that mutate data commit explicitly inside their `work(conn)` callable.
 
 | Object | Used by | Purpose |
 |--------|---------|---------|
-| `ODC_jobs` | `jobstodo`, `duplicate_check` | One row per supplier job. `process_id` is the claim marker; `human_wait_status`/`human_wait_deadline` (0.8.0) plus `rdp_host` (0.8.1) and `rdp_sessionID` (0.8.9) are the job-level human-assisted-login signal and its VNC connection details (host + session id) - see §4.2. `rdp_username`/`rdp_password` (also 0.8.1) were dropped entirely in 0.8.8 (naming/history in §4.2). |
+| `ODC_jobs` | `jobstodo`, `duplicate_check` | One row per supplier job. `process_id` is the claim marker. No longer carries any human-assisted-login signal columns - `human_wait_status`/`human_wait_deadline`/`rdp_host`/`rdp_sessionID`/`rdp_username`/`rdp_password` (added and dropped across 0.8.0-0.8.9) were all dropped via DDL by 0.8.12; see §4.2 for the file-based protocol that replaced them. |
 | `ODC_job_details` | `jobstodo`, `duplicate_check`, `updatejobdetails` | One row per account to collect. Carries `status`. |
 | `ODC_scrape_data` | `file_save_as`, `duplicate_check` | One row per downloaded document. |
 | `ODC_scrape_accounts` | `jobstodo`, `duplicate_check` | Inspired PLC account pool; also the source of `sug_internal_id` for every client via `jobstodo.get_job_details()`. |
@@ -645,112 +525,72 @@ IN PROGRESS, FOUND, REQUIRES RETRY, MISSING PARENT
 for sub-1 KB downloads. `pending` (lowercase) is the pre-run state of a
 `job_details` row and is not part of the vocabulary above.
 
-### 4.2 Human-wait signal (added 0.8.0; RDP fields and the PENDING/COMPLETE lifecycle added 0.8.1, reverted to VNC/host-only in 0.8.8, session id added 0.8.9)
+### 4.2 Assist file protocol (0.8.12; supersedes the 0.8.0-0.8.9 `ODC_jobs` human-wait signal)
 
-A separate, job-level signal on `ODC_jobs`, distinct from §4.1's per-account
-vocabulary. Written only by `jobstodo.set_human_wait()`/
-`set_human_wait_complete()`/`clear_human_wait()`; no other module reads or
-writes these columns. **Confirmed applied to both `Titan_INSE_DEV` and the
-live `Titan_INSE`** - checked directly via `INFORMATION_SCHEMA.COLUMNS` on
-2026-09-09 (see CLAUDE.md Change Log). It never included
-`human_wait_started_at`: that column was part of the original 0.8.0 design
-but dropped before any DDL request went out, since nothing reads it - only
-`human_wait_deadline` is needed for the timeout decision. One drift from
-the DDL below: the applied `human_wait_status` is `VARCHAR(50)`, not
-`NVARCHAR(30)` - harmless for the short ASCII values this library writes.
+The job-level human-assisted-login signal no longer lives on `ODC_jobs` at
+all. Control Room now has its own native "assist" feature (a node agent
+resident on each automation host); this library's role shrank to two file
+writes into the bot's own per-run job directory, which the node agent
+watches directly:
 
-```sql
-ALTER TABLE dbo.ODC_jobs ADD
-    human_wait_status   NVARCHAR(30)  NULL,   -- NULL = not waiting (or a failure/timeout exit); 'PENDING_HUMAN' = waiting; 'COMPLETE' = human finished (persists - not auto-cleared)
-    human_wait_deadline DATETIME2     NULL,   -- UTC, set when the wait begins = SYSUTCDATETIME() + timeout_s
-    rdp_host             NVARCHAR(255) NULL,   -- machine hostname/IP for the human-assisted VNC session (see naming note below)
-    rdp_sessionID        INT           NULL;   -- run node's own Windows session id
-```
+- `human_in_loop.request_assist()` writes **`assist.request`**:
+  ```json
+  {"reason": "captcha on the Energia portal"}
+  ```
+- `human_in_loop.release_assist()` writes **`assist.release`** (empty file).
 
-**Naming note (0.8.8/0.8.9):** this mechanism was briefly (0.8.1-0.8.7) built
-around RDP, adding `rdp_username`/`rdp_password` columns alongside
-`rdp_host` to connect. It reverted to VNC once it turned out that's the
-actual toolkit transport, which needs only a host - `rdp_username`/
-`rdp_password` were dropped from `ODC_jobs` entirely via
-`ALTER TABLE ... DROP COLUMN` (2026-09-10, on both `Titan_INSE_DEV` and the
-live `Titan_INSE` - confirmed via `INFORMATION_SCHEMA.COLUMNS` immediately
-after), since nothing was ever going to populate them again. `rdp_host`
-itself keeps its name despite now carrying a VNC host rather than an RDP
-one - renaming it would need its own separate DDL coordination for no
-functional benefit, so it wasn't requested.
+Both are written via a temp-file-then-rename (`human_in_loop._atomic_write()`)
+so the node agent never observes a partially-written file - `Path.replace()`,
+the same atomicity guarantee as `os.replace()` (`MoveFileEx` with
+`MOVEFILE_REPLACE_EXISTING` on Windows, a single `rename()` syscall on
+POSIX). Both writes are best-effort: a failure (job_dir doesn't exist,
+permissions, disk full) is logged and swallowed, never raised.
 
-One day later (0.8.9), a new `rdp_sessionID` column (`INT`) was added for
-the run node's own Windows session id - the toolkit needs this to build a
-job's VNC join URL as `5900 + session_id`, since a single `rdp_host` can
-run more than one session at once. The first attempt at this reused the
-just-dropped `rdp_username` column name (repurposing it to hold an integer
-session id instead of a username) to keep the DDL footprint small, matching
-how `rdp_host` was handled - but unlike `rdp_host` ("still basically a
-host"), a username-shaped column silently becoming a session-id integer was
-judged too confusing a mismatch to keep, so it was renamed to
-`rdp_sessionID` via `sp_rename` on both databases before anything shipped -
-no legacy caller ever depended on the old name. `rdp_host`'s own naming
-drift (VNC host, RDP-shaped name) remains the same kind of documented
-choice as `human_wait_status` being `VARCHAR(50)` instead of `NVARCHAR(30)`
-above.
+Once assist is active, Control Room's own existing job-state endpoint
+(`GET /api/v1/jobs/{job_id}` - not a new endpoint) carries these additional
+fields on the job record, which `inse-toolkit` polls directly - this
+library neither implements this endpoint nor reads these fields itself:
 
-`human_wait_status` lifecycle - `NULL` -> `PENDING_HUMAN` -> `COMPLETE`
-(terminal) on success, or `NULL` directly on a failure/timeout exit
-(`COMPLETE` never written on that path):
+| Field | Meaning |
+|---|---|
+| `assist_phase` | `null` -> `starting` -> `live` -> `stopped`. `null` = not requested/not currently assisted. |
+| `assist_url` | The noVNC join URL. Populated only once `assist_phase == "live"`. |
+| `assist_reason` | Echo of whatever the bot wrote to `assist.request`'s `reason` field. |
+| `assist_expires_in_s` | A countdown, in seconds. |
 
-1. **`set_human_wait()`** writes `human_wait_status = 'PENDING_HUMAN'`
-   (`jobstodo.HUMAN_WAIT_PENDING`), `human_wait_deadline`, `rdp_host`, and
-   `rdp_sessionID` - the cue for a poller's toolkit to open the VNC session
-   and connect.
-2. The caller's own wait loop - not this library - detects the human has
-   actually finished logging in (e.g. `automation-odc-energia`'s
-   `wait_for_human_login()` polls an in-page "I'm logged in" button and a
-   post-login URL check, entirely inside its own Playwright session; it
-   never reads `ODC_jobs` for this).
-3. On confirmed success, **`set_human_wait_complete()`** writes
-   `human_wait_status = 'COMPLETE'` (`jobstodo.HUMAN_WAIT_COMPLETE`) and
-   touches nothing else (0.8.5) - `rdp_host`/`rdp_sessionID` and
-   `human_wait_deadline` are left exactly as `set_human_wait()` wrote them.
-   The status change to `COMPLETE` is itself the cue for the toolkit to
-   disconnect the VNC session. `COMPLETE` is a **persistent terminal
-   state** (0.8.4): the caller must not also call `clear_human_wait()`
-   right after this, since a poller needs to be able to observe `COMPLETE`
-   without racing a fixed time budget before it disappears.
-4. **`clear_human_wait()`** nulls all four remaining columns, including
-   `human_wait_status` itself, on a failure or timeout exit - one where
-   step 3 was never reached, so the row is still at `PENDING_HUMAN`. There
-   is nothing worth keeping on that path, so it resets straight to `NULL`
-   rather than lingering.
+**Status: several details here are best-effort implementations of a
+protocol described secondhand, not yet independently verified against
+Control Room's real API/node-agent docs** - see
+`automation-odc-energia/docs/lib-odc-core-requirements.md` items 3-6 and
+CLAUDE.md's Known Gotchas/Outstanding TODOs for the full list of open
+items (exact `assist_phase` vocabulary/casing, whether `assist_url` is
+unconditionally usable as an `<iframe src>` with no extra credential,
+`assist_expires_in_s`'s authoritative-vs-advisory semantics, the node
+agent's actual noVNC port, and the exact `assist.request`/`assist.release`
+file schema/atomicity itself). None of these are lib-odc-core's own fields
+to confirm - they're Control Room/`inse-toolkit`'s.
 
-Column notes:
+**Crash-path teardown is not fully guaranteed.** `release_assist()` runs
+from `wait_for_human_login()`'s own `finally`, covering every exit through
+this process's own Python call stack (success, failure, timeout, or an
+exception from `is_logged_in()`). A hard kill (crash, `SIGKILL`, power
+loss) before that line runs writes nothing at all - closing that gap needs
+Control Room's node agent to independently detect a dead bot process,
+which is outside this library's own reach and unconfirmed either way (see
+`docs/lib-odc-core-requirements.md` item 4).
 
-- `human_wait_deadline`: computed from `SYSUTCDATETIME()` on the database
-  server (not the run node), so a poller never has to know the caller's
-  configured timeout - it only compares its own clock against
-  `human_wait_deadline`. Meaningless once `human_wait_status` leaves
-  `PENDING_HUMAN`; not read again after that.
-- `rdp_host`: the machine a poller's toolkit uses to open the VNC session
-  behind the login view - the human-assisted flow this signal exists for
-  cannot connect without it. Assigned per-job (the bot is handed a machine
-  per run, not a fixed shared one), so it is written fresh by every
-  `set_human_wait()` call rather than read from static config.
-- `rdp_sessionID`: the run node's own Windows session id (0.8.9), an `INT`.
-  Read live via `human_in_loop.get_current_session_id()`, for the same
-  "don't trust a static config value" reason as `rdp_host`.
-- `rdp_username` / `rdp_password`: dropped entirely in 0.8.8 - see the
-  naming note above. Before that (0.8.1-0.8.7) these held the RDP
-  login/password in plaintext, matching the existing portal-credential
-  pattern in `ODC_credentials`/`ODC_job_details`; that plaintext-RDP-password
-  concern no longer applies now that VNC needs no credential to store, and
-  there is no column left to leak one from.
-- All three functions raise the underlying `pyodbc.Error` if these columns
-  don't exist yet on the target database (this is an additive, opt-in
-  schema change - see the DDL above); callers should treat that as "no
-  signal support here yet", not a fatal error for the run itself.
-- Not currently read by any consumer of this library; it exists for an
-  external system (a bot orchestrator/toolkit) that polls `ODC_jobs`
-  directly to know when to surface a human-assisted login session, how to
-  connect to it, and when to disconnect.
+**Historical note, kept for the record:** `ODC_jobs` previously carried
+`human_wait_status`/`human_wait_deadline` (0.8.0), `rdp_host`/
+`rdp_username`/`rdp_password` (0.8.1, RDP-era), `rdp_sessionID` (0.8.9,
+after the 0.8.8 revert to VNC). `rdp_username`/`rdp_password` were dropped
+via DDL in 0.8.8 once the mechanism reverted to VNC (no credential
+needed); the remaining four (`human_wait_status`, `human_wait_deadline`,
+`rdp_host`, `rdp_sessionID`) were dropped via
+`ALTER TABLE ... DROP COLUMN` on both `Titan_INSE_DEV` and the live
+`Titan_INSE` on 2026-09-14, confirmed via `INFORMATION_SCHEMA.COLUMNS`
+immediately after, the same day 0.8.12 stopped writing to them. See
+CLAUDE.md's Change Log for the full sequence if that history is ever
+needed.
 
 ### 4.3 `ODC_suppliers.human_in_loop` (pre-existing column, first consumed 0.8.1)
 
@@ -769,6 +609,8 @@ caller can branch on it directly:
 ```python
 rows = jobstodo.get_job_details(process_id, job_id, tables, dsn)
 if rows and rows[0]["human_in_loop"]:
+    human_in_loop.request_assist(job_id, "captcha on the portal", job_dir)  # before page.goto()
+    # ... browser launch, page.goto(), cookie-banner dismissal ...
     success = human_in_loop.wait_for_human_login(...)  # §3.2a
 ```
 
@@ -785,10 +627,10 @@ gotcha - see CLAUDE.md Known Gotchas).
 src/odc_core/
 ├── __init__.py            # module re-exports + __version__
 ├── db.py                  # trusted DSN connect + transient-SQLSTATE retry
-├── jobstodo.py            # claim a job, fetch job_details, multi-credential pool,
-│                          # human-wait signal (set_human_wait/set_human_wait_complete/clear_human_wait)
-├── human_in_loop.py       # generalised human-assisted-login: banner, confirm
-│                          # button, poll loop, wraps jobstodo's human-wait signal
+├── jobstodo.py            # claim a job, fetch job_details, multi-credential pool
+├── human_in_loop.py       # generalised human-assisted-login: request_assist()/
+│                          # release_assist() (assist.request/assist.release file
+│                          # protocol), banner, confirm button, poll loop
 ├── duplicate_check.py     # pre-download "already have it?" guard
 ├── file_allocation.py     # target folder/filename convention
 ├── file_save_as.py        # move file into place, insert scrape_data row

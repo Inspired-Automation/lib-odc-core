@@ -45,54 +45,40 @@ for detail in job_details:
 - `jobstodo.py` - claim a job (`ODC_jobs.process_id`), fetch pending/searchable
   `ODC_job_details` rows (joined to `ODC_scrape_accounts` for `sug_internal_id`
   and left-joined to `ODC_suppliers` for `human_in_loop`), revert/clear a
-  claim, look up multi-credential rows. Also owns the job-level
-  human-assisted-login signal on `ODC_jobs`: `set_human_wait()` /
-  `set_human_wait_complete()` / `clear_human_wait()` - see `human_in_loop.py`
-  below for the higher-level entry point most callers should use instead.
-- `human_in_loop.py` - `wait_for_human_login()`: the full human-assisted-login
-  mechanism for any supplier flagged by `ODC_suppliers.human_in_loop` - an
-  on-page banner, an injected "I'm logged in" confirm button, a poll loop,
-  and the `jobstodo` DB signal lifecycle around it, all in one call. The
-  caller supplies `is_logged_in(page) -> bool`, the one genuinely
-  portal-specific piece (each supplier's post-login marker differs), and
-  may override the "started" banner text via `started_message` (default:
-  generic wording) for a portal-specific instruction, e.g. "resolve the
-  reCAPTCHA challenge". On success, `human_wait_status` is left at
-  `COMPLETE` (a persistent terminal state, not auto-cleared). Generalised
-  out of `automation-odc-energia`'s
-  Phase 3. Also exports `get_current_hostname()` (`socket.gethostname()`)
-  and `get_current_session_id()` (0.8.9, a single `ctypes` call to
-  `kernel32.ProcessIdToSessionId()`) for building `wait_for_human_login()`'s
-  `rdp_host`/`session_id` arguments from this run node's own identity rather
-  than static, driftable config - the toolkit needs both to build a job's
-  VNC join URL as `5900 + session_id`, since one machine can run more than
-  one session. This mechanism connects over VNC, which needs no username/
-  password - 0.8.8 removed `get_current_windows_username()`/
-  `get_rdp_password()` and the `rdp_username`/`rdp_password` arguments they
-  built, added in 0.8.1-0.8.7 when this was briefly built around RDP
-  instead. 0.8.9 then added a new `rdp_sessionID` column to hold
-  `session_id`, rather than reusing either dropped column's name. Also
-  exports `start_vnc_server(session_id, timeout_s=10.0)` (0.8.9,
-  fire-and-forget `tvnserver -run`, then polls the session's own VNC port
-  until it accepts a connection or `timeout_s` elapses) - call this before
-  launching the browser for any `human_in_loop=1` supplier, so the VNC
-  session the toolkit connects to is confirmed up first. The `tvnserver`
-  path itself is resolved (0.8.10) via env var override, then the Windows
-  "App Paths" registry key, then TightVNC's default install locations -
-  not a bare `"tvnserver"` string, which only resolves via `PATH` and
-  reliably failed on a real run node with TightVNC installed but not on
-  `PATH`. Before launching, it also writes the target port into the
-  registry and stops any already-running instance for this session
-  (0.8.11) - TightVNC has no built-in "listen on `5900 + session_id`"
-  behaviour of its own; confirmed live that a bare `-run` always used the
-  plain default port regardless of session until this was added.
-  `prepare_vnc_session(human_in_loop_flag,
-  timeout_s=10.0)` (0.8.9) wraps the whole thing generically: pass it a job
-  row's `human_in_loop` value - `None` if falsy (nothing to prepare), or
-  `(rdp_host, session_id)` if truthy, having already resolved both and
-  started/confirmed the VNC server. One call any `human_in_loop=1` supplier
-  can use instead of hand-rolling the check-and-sequence itself; must run
-  before that supplier's own browser launch.
+  claim, look up multi-credential rows. No longer touches any human-wait
+  signal on `ODC_jobs` (see `human_in_loop.py`'s file-based replacement,
+  below) - `set_human_wait()`/`set_human_wait_complete()`/
+  `clear_human_wait()` were removed in 0.8.12.
+- `human_in_loop.py` - the human-assisted-login mechanism for any supplier
+  flagged by `ODC_suppliers.human_in_loop`, now two calls instead of one:
+  - `request_assist(job_id, reason, job_dir)` - non-blocking, writes
+    `assist.request` (`{"reason": reason}`) into `job_dir`, signalling
+    Control Room's own node agent to provision a human-assisted VNC
+    session. Safe (and intended) to call before `page.goto()` navigates
+    anywhere, so the node agent's provisioning overlaps with the browser's
+    own navigation instead of happening strictly after it. `job_dir` is
+    the bot's own per-run job directory - e.g. `ctx.job_file.parent` where
+    `ctx = automation_core.setup(...)` resolved it from
+    `--job-file`/`CR_JOB_FILE` - lib-odc-core does not resolve or guess
+    this path itself.
+  - `wait_for_human_login()` - unchanged otherwise (an on-page banner, an
+    injected "I'm logged in" confirm button, a poll loop; the caller
+    supplies `is_logged_in(page) -> bool`, the one genuinely
+    portal-specific piece, and may override the "started" banner text via
+    `started_message`), but no longer triggers assist itself - that
+    already happened via `request_assist()`. Calls
+    `release_assist(job_id, job_dir)` in its own `finally` on every exit
+    path instead of writing to `ODC_jobs`.
+
+  0.8.12 replaced the previous `ODC_jobs.human_wait_status`/`rdp_host`/
+  `rdp_sessionID` DB signal, and this module's tvnserver-launching
+  machinery (`get_current_hostname()`, `get_current_session_id()`,
+  `start_vnc_server()`, `prepare_vnc_session()`), with this file-based
+  protocol - VNC/websockify session provisioning is now Control Room's own
+  node agent's responsibility, not this bot's or lib-odc-core's. See
+  `CHANGELOG.md`'s 0.8.12 entry for the full breaking-change list and its
+  still-unverified details (exact file schema/atomicity, crash-path
+  teardown guarantee).
 - `file_allocation.py` - work out the target folder/filename for a downloaded
   invoice from `ODC_jobs`/`ODC_job_details` fields. For Inspired PLC, resolves
   the company folder name from SugarCRM via `sugar_client` and `sug_internal_id`
