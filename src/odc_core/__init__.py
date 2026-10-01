@@ -17,6 +17,7 @@ from . import (
     duplicate_check,
     file_allocation,
     file_save_as,
+    grab_all,
     graph_client,
     human_in_loop,
     jobstodo,
@@ -26,7 +27,7 @@ from . import (
     validate_username,
 )
 
-__version__ = "0.8.12"
+__version__ = "0.9.0"
 
 __all__ = [
     "browser_helpers",
@@ -34,6 +35,7 @@ __all__ = [
     "duplicate_check",
     "file_allocation",
     "file_save_as",
+    "grab_all",
     "graph_client",
     "human_in_loop",
     "jobstodo",

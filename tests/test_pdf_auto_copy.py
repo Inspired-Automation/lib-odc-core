@@ -21,10 +21,11 @@ def test_copy_defaults_to_dev_env_when_env_absent(tmp_path):
 @patch("odc_core.pdf_auto_copy.Path.mkdir")
 def test_copy_falls_back_to_default_base_path(mock_mkdir, mock_copy2):
     # No pdf_auto key at all: must land under _DEFAULT_BASE. Filesystem calls
-    # are mocked so this never touches the real I: drive.
+    # are mocked so this never touches the real share.
     dest = pdf_auto_copy.copy(r"C:\staging\invoice.pdf", "Crown Gas", {})
 
     assert str(dest).startswith(pdf_auto_copy._DEFAULT_BASE)
+    assert str(dest).startswith("\\\\inspiredenergysolutions.local\\")
     assert dest.parts[-3:] == ("PDFAuto", "Crown Gas", "invoice.pdf")
     mock_copy2.assert_called_once()
 

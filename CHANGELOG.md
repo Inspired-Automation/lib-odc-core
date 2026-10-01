@@ -5,7 +5,27 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
-## [Unreleased]
+## [0.9.0] - 2026-10-01
+### Added
+- `grab_all` module for "grab all" jobs (`ODC_jobs.grab_all = 1`), which
+  walk every account on the portal instead of looping `ODC_job_details`:
+  `get_job()` (now also `LEFT JOIN`s `{suppliers}` for `human_in_loop`,
+  the same way `jobstodo._SELECT_JOB_DETAILS` already does, so a grab-all
+  job - which has no `ODC_job_details` row to read that flag from - can
+  still decide whether to request human-assisted login), `is_grab_all_job()`,
+  `claim_job()`, `is_duplicate()` (checks the new `tables["grab_all_data"]`
+  table only), `allocate()` (fills blank portal values with `UNKNOWN`, then
+  delegates to `file_allocation.allocate()`) and `save()` (move plus insert
+  into `ODC_grab_all_data`'s own column set, VOID by inserted id). First
+  consumers: `automation-odc-sse-airtricity`, `automation-odc-energia`.
+  `file_save_as` is unchanged.
+
+### Changed
+- `pdf_auto_copy`'s default base path is now the UNC form of the I: drive
+  (`\\inspiredenergysolutions.local\DFS\Public\!IES\BPI\Automation Team\Automated Processes\ODC`)
+  instead of `I:\BPI\...`, so the copy no longer depends on the run node's
+  account having I: mapped. Every supplier repo's `pdf_auto.base_path` was
+  updated to match.
 
 ## [0.8.12] - 2026-09-14
 ### Changed

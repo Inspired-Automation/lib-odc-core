@@ -88,6 +88,13 @@ for detail in job_details:
   PLC folder naming.
 - `file_save_as.py` - move a downloaded file into place and insert the
   `ODC_scrape_data` row (marks it `VOID` if under 1 KB).
+- `grab_all.py` - for "grab all" jobs (`ODC_jobs.grab_all = 1`), which walk
+  every account on the portal instead of looping `ODC_job_details`:
+  `get_job()`/`is_grab_all_job()` (read the job row and decide the mode),
+  `claim_job()`, `is_duplicate()` (checks `ODC_grab_all_data` only),
+  `allocate()` (fills blank portal values, then the same convention as
+  `file_allocation.allocate()`) and `save()` (the `file_save_as.save()`
+  equivalent for `ODC_grab_all_data`'s own column set).
 - `duplicate_check.py` - `is_duplicate()`: has this invoice already been
   recorded? Standard suppliers check `ODC_scrape_data` directly; `client_name
   == "inspired plc"` accounts are also cross-checked against
@@ -139,6 +146,7 @@ database:
 tables:
   dev:  {jobs: ..., job_details: ..., scrape_data: ..., scrape_accounts: ..., suppliers: ..., web_scrape_data: ..., multi_credential: ..., credential: ..., db_name: ...}
   live: {jobs: ..., job_details: ..., scrape_data: ..., scrape_accounts: ..., suppliers: ..., web_scrape_data: ..., multi_credential: ..., credential: ..., db_name: ...}
+  # grab-all callers only: grab_all_data: ODC_grab_all_data
 
 graph:
   client_id:

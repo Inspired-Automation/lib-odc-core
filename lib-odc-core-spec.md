@@ -78,7 +78,7 @@ file_allocation:
   utilities: [ELEC, WATER, GAS, OTHER]
 
 pdf_auto:
-  base_path: I:\BPI\Automation Team\Automated Processes\ODC
+  base_path: \\inspiredenergysolutions.local\DFS\Public\!IES\BPI\Automation Team\Automated Processes\ODC
 
 env: dev
 ```
@@ -96,6 +96,7 @@ env: dev
 | `human_in_loop` | no `tables`/`dsn` (0.8.12 - it no longer touches `ODC_jobs`); `job_dir` (a `Path`, passed directly - the bot's own per-run job directory, e.g. `ctx.job_file.parent`); `config` only for `browser_helpers.take_error_screenshot()` on timeout - same keys as `browser_helpers` above |
 | `pdf_auto_copy` | `config["env"]`, `config["pdf_auto"]["base_path"]` |
 | `validate_username` | nothing |
+| `grab_all` | `tables["jobs"]`, `tables["grab_all_data"]`, `dsn`; `allocate()` needs the same config as `file_allocation` |
 
 Graph credentials are never hardcoded in this package. A caller that omits
 `tenant_id`, `client_id`, or `client_secret` gets a `ValueError`.
@@ -346,6 +347,46 @@ account. This replaced keying the folder on `customer_name` directly, which
 let two job rows for the same company land in different folders if their
 free-text `customer_name` differed.
 
+### 3.4b `grab_all` - "grab all" jobs (0.9.0)
+
+A grab-all job (`ODC_jobs.grab_all = 1`) does not loop `ODC_job_details`: the
+supplier walks every account the portal lists and downloads every bill dated
+on or after `ODC_jobs.grab_all_start_date` (NULL = no limit) that is not
+already in `ODC_grab_all_data`. Account reference, meter, utility and
+customer name all come from the portal.
+
+```python
+get_job(job_id, tables, dsn) -> dict | None
+is_grab_all_job(job: dict | None) -> bool
+claim_job(job_id, process_id, tables, dsn) -> None
+is_duplicate(account_reference, supplier, client_name, unique_file_ref,
+             tables, dsn) -> bool
+allocate(*, client_name, customer_name, account_reference, supplier,
+         client_location, utility, meter_number, doc_type,
+         bill_date_corrected, file_extension, invoice_number,
+         config, sug_internal_id=None) -> dict
+save(*, staging_path, target_path, job_id, account_reference,
+     unique_file_ref, bill_date, bill_date_corrected, original_filename,
+     complete_filename, file_extension, client_filepath, customer_name,
+     doc_type, download_location, process_id, tables, dsn) -> bool
+```
+
+- `get_job()` returns the job row with the same job-level keys as
+  `jobstodo.get_job_details()` rows, plus `id`, `grab_all`,
+  `grab_all_start_date`. It does not claim; `claim_job()` runs the same
+  `process_id` stamp `get_job_details()` does.
+- `is_duplicate()` has the same argument order as
+  `duplicate_check.is_duplicate()`, but checks `ODC_grab_all_data` joined to
+  `ODC_jobs` on `job_id` (for supplier/client). It never consults
+  `ODC_scrape_data`, and is not keyed on job_id, so recreating a job does not
+  re-download.
+- `allocate()` substitutes `UNKNOWN` for a blank `meter_number`/`utility`,
+  then calls `file_allocation.allocate()` unchanged.
+- `save()` behaves like `file_save_as.save()` (move, insert, VOID if under
+  1 KB) but inserts `ODC_grab_all_data`'s own column set, which has no
+  `job_details_id`/`account_type`/`zip_address`. The insert uses
+  `OUTPUT INSERTED.id`, and the VOID update targets that id. Keyword-only.
+
 ### 3.4a `sugar_client` - SugarCRM account lookup
 
 ```python
@@ -435,7 +476,9 @@ copy(source_filepath: str, client_name: str, config: dict) -> Path
 
 Copies the filed invoice to `{base}/{env}/PDFAuto/{client_name}/{filename}` and
 returns the destination. `base` comes from `config["pdf_auto"]["base_path"]`,
-defaulting to `I:\BPI\Automation Team\Automated Processes\ODC`; `env` comes from
+defaulting to `\\inspiredenergysolutions.local\DFS\Public\!IES\BPI\Automation Team\Automated Processes\ODC`
+(the UNC form of `I:\BPI\...`, so it works for run-node accounts without the
+I: drive mapped); `env` comes from
 `config["env"]`, defaulting to `dev`. Call only when the job's `pdf_auto` flag is set.
 
 ### 3.10 `browser_helpers`
@@ -502,6 +545,7 @@ callers that mutate data commit explicitly inside their `work(conn)` callable.
 | `ODC_jobs` | `jobstodo`, `duplicate_check` | One row per supplier job. `process_id` is the claim marker. No longer carries any human-assisted-login signal columns - `human_wait_status`/`human_wait_deadline`/`rdp_host`/`rdp_sessionID`/`rdp_username`/`rdp_password` (added and dropped across 0.8.0-0.8.9) were all dropped via DDL by 0.8.12; see §4.2 for the file-based protocol that replaced them. |
 | `ODC_job_details` | `jobstodo`, `duplicate_check`, `updatejobdetails` | One row per account to collect. Carries `status`. |
 | `ODC_scrape_data` | `file_save_as`, `duplicate_check` | One row per downloaded document. |
+| `ODC_grab_all_data` | `grab_all` | One row per document downloaded by a grab-all job. 17 columns (Titan_INSE_DEV, 2026-09-29): `id, created_at_utc, job_id, client_customer_name, account_reference, bill_date, unique_file_ref, file_name, file_type, download_location, bill_date_corrected, process_id, original_file_name, doc_type, client_file_path, notif_process_id, status`. There is no `job_details_id`. |
 | `ODC_scrape_accounts` | `jobstodo`, `duplicate_check` | Inspired PLC account pool; also the source of `sug_internal_id` for every client via `jobstodo.get_job_details()`. |
 | `ODC_suppliers` | `jobstodo` | One row per supplier (pre-existing, not owned by this library). Source of `human_in_loop` (§4.3), left-joined by `jobstodo.get_job_details()`. |
 | `ODC_multi_credentials`, `ODC_credentials` | `jobstodo` | Shared credential pool for multi-credential jobs. |

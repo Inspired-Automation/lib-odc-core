@@ -67,6 +67,16 @@ entry point of its own.
   left-joins this table on `ODC_jobs.supplier_id` and returns
   `human_in_loop` on every row - see spec §4.3 and the new `human_in_loop`
   module below.
+- **Grab-all (released in 0.9.0; schema on DEV and live)**: `ODC_jobs.grab_all`
+  (`TINYINT NOT NULL DEFAULT 0`; `BIT` on DEV until migration 004 on
+  2026-10-01) and `ODC_jobs.grab_all_start_date` (`DATE NULL`), plus the
+  new `ODC_grab_all_data` table (17 columns, no `job_details_id`/
+  `account_type`/`zip_address`, has `status`), read and written only by
+  `grab_all.py`. The DDL lives in
+  `automation-odc-sse-airtricity/migrations/001-005` (the first consumer),
+  since this library owns no migrations: 001-004 for `Titan_INSE_DEV`, 005
+  for the live `Titan_INSE` (applied 2026-10-01, the schema confirmed
+  identical to DEV straight after).
 - `sugar_client.py` (added 0.7.0) is the one module that talks to a second,
   unrelated database: SugarCRM itself (`DSN=Sugar Corp`, MySQL), read-only,
   looking up `accounts.NAME` by id. Not Titan, not Jupiter - a caller must
@@ -154,7 +164,25 @@ entry point of its own.
   `automation-odc-energia`'s Phase 3, the only current `human_in_loop=1`
   supplier.
 
+- Grab-all jobs (`grab_all.py`, 0.9.0): dedup is deliberately separate
+  from `duplicate_check`. `grab_all.is_duplicate()` checks
+  `ODC_grab_all_data` only, keyed on account/supplier/client/unique_file_ref
+  (not job_id), and never `ODC_scrape_data`. So a bill already downloaded by
+  an account-search job for the same account can be downloaded again by a
+  grab-all job (the developer's decision, 2026-09-29). Saving is
+  `grab_all.save()`, not `file_save_as.save()`: the grab-all table's
+  insert columns differ (no `job_details_id`). An earlier draft that
+  reused `file_save_as.save()` with a table override was dropped once the
+  real DEV table was created, and `file_save_as` is unchanged.
+
 ## Known Gotchas
+- `file_save_as.save()`'s VOID update (`SET [status] = 'VOID'`) targets a
+  column the live `ODC_scrape_data` does not have (confirmed via
+  `INFORMATION_SCHEMA.COLUMNS` on `Titan_INSE`, recorded in
+  automation-odc-energia's CLAUDE.md). Any sub-1 KB download on the normal
+  path raises `Invalid column name 'status'` after the INSERT has already
+  committed. `ODC_grab_all_data` has a `status` column, so the grab-all path
+  is not affected. Not fixed here - see Outstanding TODOs.
 - The original per-supplier framework hardcoded Graph `client_id`/`client_secret`/
   `tenant_id` directly in source (`graph_otp.py`, `mailer.py`). This package
   fixes that: credentials always come from the caller's `config["graph"]`.
@@ -293,6 +321,23 @@ entry point of its own.
   entry.
 
 ## Change Log
+- 2026-10-01: v0.9.0 - MINOR release of the two entries below (the new
+  `grab_all` module and the `pdf_auto_copy` UNC default). Purely additive:
+  no existing signature changed. Cut once the grab-all schema existed on
+  both `Titan_INSE_DEV` and the live `Titan_INSE` (migration 005 in
+  automation-odc-sse-airtricity). Consumers still pin their own upgrade
+  separately (see Outstanding TODOs).
+- 2026-10-01: `pdf_auto_copy._DEFAULT_BASE` switched from
+  `I:\BPI\...` to its UNC form
+  (`\\inspiredenergysolutions.local\DFS\Public\!IES\BPI\...`, the I: drive's
+  mapping per `net use`), so the PDF Auto copy works for accounts without
+  I: mapped. `pdf_auto.base_path` in every `automation-odc-*` repo's
+  `config.yaml`/`config.template.yaml` was updated the same day.
+- 2026-09-29: added `grab_all.py` (`get_job`, `is_grab_all_job`,
+  `claim_job`, `is_duplicate`, `allocate`, `save`) for
+  automation-odc-sse-airtricity's new grab-all mode. Purely additive: no
+  existing module changed. Consumed via the editable install until it was
+  released in v0.9.0.
 - 2026-09-14: v0.8.12 - re-architected the human-assisted-login mechanism
   onto Control Room's own native "assist" feature, per
   automation-odc-energia's `docs/lib-odc-core-requirements.md` (the
@@ -766,6 +811,13 @@ entry point of its own.
   does not exist and made the documented `pip install` URLs 404).
 
 ## Outstanding TODOs
+- Pin `v0.9.0` in automation-odc-sse-airtricity and automation-odc-energia
+  (the two grab-all consumers) once their own grab-all work is committed.
+  sse-airtricity is still on v0.8.1, so check the 0.8.x changes against it
+  too, especially 0.8.12's breaking `human_in_loop` signatures.
+- Fix `file_save_as.save()`'s VOID update against `ODC_scrape_data`, which
+  has no `status` column (see Known Gotchas). Either add the column
+  (Titan-owned DDL) or drop the update for that table.
 - Cut a `v0.8.12` release with the built wheel attached, following
   `RELEASING.md`. `automation-odc-energia` (the only current
   `human_in_loop=1` consumer) needs to pin `v0.8.12` and update

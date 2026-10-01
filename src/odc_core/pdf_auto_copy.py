@@ -8,7 +8,9 @@ from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
-_DEFAULT_BASE = r"I:\BPI\Automation Team\Automated Processes\ODC"
+# UNC form of I:\BPI\... - Control Room run nodes' service accounts do not
+# necessarily have the I: drive letter mapped.
+_DEFAULT_BASE = r"\\inspiredenergysolutions.local\DFS\Public\!IES\BPI\Automation Team\Automated Processes\ODC"
 
 
 def copy(source_filepath: str, client_name: str, config: dict) -> Path:
@@ -16,7 +18,7 @@ def copy(source_filepath: str, client_name: str, config: dict) -> Path:
     Copy *source_filepath* into:
       {base}/{env}/PDFAuto/{client_name}/{same filename}
 
-    *base* defaults to the I: drive path; override via config['pdf_auto']['base_path'].
+    *base* defaults to the I: drive's UNC path; override via config['pdf_auto']['base_path'].
     *env* comes from config['env'] (dev | live).
     """
     env = config.get("env", "dev")
