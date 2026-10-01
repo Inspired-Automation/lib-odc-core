@@ -811,10 +811,13 @@ entry point of its own.
   does not exist and made the documented `pip install` URLs 404).
 
 ## Outstanding TODOs
-- Pin `v0.9.0` in automation-odc-sse-airtricity and automation-odc-energia
-  (the two grab-all consumers) once their own grab-all work is committed.
-  sse-airtricity is still on v0.8.1, so check the 0.8.x changes against it
-  too, especially 0.8.12's breaking `human_in_loop` signatures.
+- **Done (2026-10-01)**: `v0.9.0` is pinned in all 17 supplier bots (every
+  `automation-odc-*` repo except `mi-report`, `accounts-and-jobs-refresh`
+  and `pdf-auto`, which were left on their own pins). Before committing,
+  every repo's `src/` was compiled and its `odc_core` references were
+  checked against the installed 0.9.0 wheel: none use the removed 0.8.x
+  human-wait/VNC APIs. energia and sse-airtricity committed their grab-all
+  work in the same commit.
 - Fix `file_save_as.save()`'s VOID update against `ODC_scrape_data`, which
   has no `status` column (see Known Gotchas). Either add the column
   (Titan-owned DDL) or drop the update for that table.
@@ -874,15 +877,12 @@ entry point of its own.
   `live`. This also means the earlier "job 145 blank `human_wait_status`"
   hypothesis (old 4-arg `set_human_wait()` signature) predates this
   migration and needs retesting against v0.8.3, not assumed still valid.
-- **Every other supplier project's `config.yaml` needs a new
-  `tables.suppliers: ODC_suppliers` key before upgrading past v0.8.0** -
-  breaking for every caller of `jobstodo.get_job_details()`, not only
-  human-wait/RDP suppliers (see the Known Gotchas entry). At least
-  `automation-odc-wave`, `automation-odc-british-gas`,
-  `automation-odc-crown-gas-and-power-ltd`,
-  `automation-odc-totalenergies-gas-power-ltd`,
-  `automation-odc-castle-water-ltd`, and `automation-odc-source-for-business`
-  still need this (`automation-odc-energia` already has it - see above).
+- **Templates resolved (2026-10-01)**: every supplier bot's committed
+  `config/config.template.yaml` now has `tables.suppliers` for `dev` and
+  `live`. In 13 repos it had sat uncommitted since the 0.8.1 rollout and was
+  checked in with the v0.9.0 pin. Still open: each machine's local,
+  git-ignored `config/config.yaml` needs the key added by hand, or
+  `jobstodo.get_job_details()` raises `KeyError: 'suppliers'`.
 - **Resolved by v0.8.8** (was: retroactively confirm the plaintext storage
   of `rdp_username`/`rdp_password` on `ODC_jobs` is acceptable to whoever
   owns Titan security/compliance) - moot now that both columns were dropped
