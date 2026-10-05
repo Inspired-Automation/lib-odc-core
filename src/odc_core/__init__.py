@@ -22,12 +22,13 @@ from . import (
     human_in_loop,
     jobstodo,
     pdf_auto_copy,
+    sftp_upload,
     sugar_client,
     updatejobdetails,
     validate_username,
 )
 
-__version__ = "0.9.0"
+__version__ = "0.10.0"
 
 __all__ = [
     "browser_helpers",
@@ -40,6 +41,7 @@ __all__ = [
     "human_in_loop",
     "jobstodo",
     "pdf_auto_copy",
+    "sftp_upload",
     "sugar_client",
     "updatejobdetails",
     "validate_username",

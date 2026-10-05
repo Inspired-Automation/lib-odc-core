@@ -5,6 +5,35 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.10.0] - 2026-10-05
+### Added
+- `sftp_upload` module: upload filed documents to a client's SFTP server.
+  Switched on per client by `config["sftp"]["clients"]` (no database
+  column). `SftpSession` (one connection per run, one reconnect on a
+  dropped connection, then marks itself broken), `upload()` (atomic:
+  `.part`, size check, rename, plus a local `<file>.uploaded` sidecar; a
+  same-size remote file counts as done), `is_uploaded()`,
+  `is_enabled_for()`, and `pending_files()` (filed documents for a
+  supplier/client since a date that still lack a sidecar, from
+  `ODC_scrape_data` and, when configured, `ODC_grab_all_data`), for a
+  next-run sweep of failed uploads. Host keys are pinned trust-on-first-use
+  (or a configured `host_key`); a changed key refuses the connection.
+  First consumer: `automation-odc-electric-ireland` (client Horizon).
+- New dependency: `paramiko>=4.0,<6`.
+
+### Fixed
+- `pdf_auto_copy.copy()` copied production files to `{base}\prod\PDFAuto`,
+  because every supplier bot sets `config["env"] = "prod"` and the env was
+  used verbatim as the folder name. `spODC_job_details_UpdateStatus` queues
+  `{base}\LIVE\PDFAuto` paths, so every PDF Auto upload since 2026-10-01
+  failed with "cannot find the file specified". `env` now maps to the folders
+  the proc uses (`prod`/`live` to `LIVE`, `dev` to `DEV`); any other value
+  raises `ValueError`.
+- `pdf_auto_copy.copy()` now verifies each copy (the destination exists with
+  the source's size) and raises the new `PdfAutoCopyError`, an `OSError`, if
+  not. A failed copy no longer lets the account reach `Downloaded` and get
+  queued for a file that isn't there.
+
 ## [0.9.0] - 2026-10-01
 ### Added
 - `grab_all` module for "grab all" jobs (`ODC_jobs.grab_all = 1`), which

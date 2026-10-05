@@ -77,6 +77,17 @@ file_allocation:
   statuses:  [ARCHIVE, HOLDING, NEW]
   utilities: [ELEC, WATER, GAS, OTHER]
 
+sftp:                       # 0.10.0, sftp_upload callers only
+  host:
+  port: 22
+  username:                 # config.yaml / Runtime config only
+  password:                 # config.yaml / Runtime config only
+  remote_dir: ""
+  host_key:                 # optional; blank = trust on first use
+  known_hosts_file: config/sftp_known_hosts
+  clients: []
+  timeout_s: 60
+
 pdf_auto:
   base_path: \\inspiredenergysolutions.local\DFS\Public\!IES\BPI\Automation Team\Automated Processes\ODC
 
@@ -94,9 +105,10 @@ env: dev
 | `graph_client` | `config["graph"]` |
 | `browser_helpers` | `config["delays"]`, plus `_logs_dir`/`_process_id`/`_supplier_name` for screenshots |
 | `human_in_loop` | no `tables`/`dsn` (0.8.12 - it no longer touches `ODC_jobs`); `job_dir` (a `Path`, passed directly - the bot's own per-run job directory, e.g. `ctx.job_file.parent`); `config` only for `browser_helpers.take_error_screenshot()` on timeout - same keys as `browser_helpers` above |
-| `pdf_auto_copy` | `config["env"]`, `config["pdf_auto"]["base_path"]` |
+| `pdf_auto_copy` | `config["env"]` (`prod`/`live`/`dev`), `config["pdf_auto"]["base_path"]` |
 | `validate_username` | nothing |
 | `grab_all` | `tables["jobs"]`, `tables["grab_all_data"]`, `dsn`; `allocate()` needs the same config as `file_allocation` |
+| `sftp_upload` | `config["sftp"]`; `pending_files()` also `tables["jobs"]`, `tables["job_details"]`, `tables["scrape_data"]`, optional `tables["grab_all_data"]`, `dsn` |
 
 Graph credentials are never hardcoded in this package. A caller that omits
 `tenant_id`, `client_id`, or `client_secret` gets a `ValueError`.
@@ -474,12 +486,52 @@ non-word characters. Guards against blank or punctuation-only portal usernames.
 copy(source_filepath: str, client_name: str, config: dict) -> Path
 ```
 
-Copies the filed invoice to `{base}/{env}/PDFAuto/{client_name}/{filename}` and
-returns the destination. `base` comes from `config["pdf_auto"]["base_path"]`,
-defaulting to `\\inspiredenergysolutions.local\DFS\Public\!IES\BPI\Automation Team\Automated Processes\ODC`
-(the UNC form of `I:\BPI\...`, so it works for run-node accounts without the
-I: drive mapped); `env` comes from
-`config["env"]`, defaulting to `dev`. Call only when the job's `pdf_auto` flag is set.
+Copies the filed invoice to `{base}/{LIVE|DEV}/PDFAuto/{client_name}/{filename}`,
+verifies it, and returns the destination.
+- `base` comes from `config["pdf_auto"]["base_path"]`, defaulting to
+  `\\inspiredenergysolutions.local\DFS\Public\!IES\BPI\Automation Team\Automated Processes\ODC`.
+  That is the UNC form of `I:\BPI\...`, so it works for run-node accounts
+  without the I: drive mapped.
+- The `LIVE`/`DEV` folder comes from `config["env"]` (0.10.0): `prod` or `live`
+  maps to `LIVE`, and `dev` (the default) maps to `DEV`. Any other value raises
+  `ValueError`. These are the folders `spODC_job_details_UpdateStatus` writes
+  into `ODC_job_details_pdfauto.filepath`, so the two must stay in step.
+- After copying, the destination must exist with the source's size, or
+  `PdfAutoCopyError` (an `OSError`) is raised.
+
+Call only when the job's `pdf_auto` flag is set.
+
+### 3.9a `sftp_upload` (0.10.0)
+
+```python
+is_enabled_for(client_name: str | None, config: dict) -> bool
+is_uploaded(local_path) -> bool
+pending_files(supplier: str, client_name: str, since: date, tables: dict, dsn: str) -> list[str]
+
+with SftpSession(config) as session:      # raises SftpUploadError if it cannot connect
+    session.upload(local_path, remote_name=None) -> bool   # never raises
+```
+
+- Enabled per client by `config["sftp"]["clients"]` (case/space-insensitive
+  match on `ODC_jobs.client_name`). No database column.
+- `upload()`: `<name>.part` in `remote_dir` (blank = login folder), remote
+  size check, `posix_rename` (plain rename fallback), then a local
+  `<file>.uploaded` JSON sidecar (UTC time, host, remote path, size). A
+  remote file of the same size counts as uploaded. One reconnect on a
+  dropped connection; if that fails the session is `broken` and every later
+  upload returns False. A server-side error on a live connection fails
+  that file only.
+- Host keys: a configured `host_key` is the only key accepted
+  (`RejectPolicy`). Otherwise trust-on-first-use: the first key is saved to
+  `known_hosts_file` and its SHA256 fingerprint logged at WARNING; any other
+  key afterwards (including a different key type) refuses the connection.
+  Never `AutoAddPolicy`.
+- `pending_files()`: `client_file_path` from `ODC_scrape_data` (via
+  `ODC_job_details` -> `ODC_jobs`) and, when `tables` has `grab_all_data`,
+  `ODC_grab_all_data` (via `ODC_jobs`), for the supplier/client with
+  `bill_date_corrected >= since`; minus files with a sidecar, files missing
+  locally, and files under 1 KB (VOID; `ODC_scrape_data` has no `status`).
+- Credentials are never logged.
 
 ### 3.10 `browser_helpers`
 

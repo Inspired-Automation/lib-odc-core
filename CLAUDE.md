@@ -14,6 +14,7 @@ entry point of its own.
 - Python 3.14
 - `pyodbc` - MSSQL access (trusted connections, parameterised queries)
 - `msal`, `requests` - Microsoft Graph token acquisition and API calls
+- `paramiko` - SFTP upload (`sftp_upload.py`, 0.10.0)
 - Built and distributed as a wheel via GitHub Releases (same pattern as
   `lib-core`/`automation_core`), not published to PyPI.
 
@@ -88,6 +89,11 @@ entry point of its own.
   `client_secret`, `tenant_id`, and (for `send_mail`) `sender_address`.
   Credentials are never hardcoded here - each calling project supplies them
   via its own `config.yaml`.
+- SFTP (`sftp_upload.py`): per-client upload of filed documents. Host,
+  port, username, password, remote_dir, host_key, known_hosts_file,
+  clients and timeout_s come from the caller's `config["sftp"]`;
+  credentials only ever from `config.yaml` / the Control Room Runtime
+  config panel, never logged.
 
 ## Configuration
 - This package reads no config file itself. See README.md "Expected config
@@ -176,6 +182,16 @@ entry point of its own.
   real DEV table was created, and `file_save_as` is unchanged.
 
 ## Known Gotchas
+- `pdf_auto_copy`'s target folder must match the path that
+  `spODC_job_details_UpdateStatus` queues into `ODC_job_details_pdfauto.filepath`:
+  `{base}\LIVE\PDFAuto\{client}` on `Titan_INSE` and `{base}\DEV\PDFAuto\{client}`
+  on DEV. The PDF Auto upload bot only ever opens the queued path. Up to 0.9.0
+  the folder was `config["env"]` used verbatim, and every supplier bot sets
+  `env = "prod"` in production. Copies therefore landed in `{base}\prod\PDFAuto`,
+  and every upload failed with "cannot find the file specified" (80 rows,
+  2026-10-01 to 10-05). Earlier rows had only worked because 741 files were
+  bulk-copied from `prod` to `LIVE` by hand on 2026-10-01. Fixed in 0.10.0 by
+  `_ENV_FOLDERS`. If the proc's paths ever change, change `_ENV_FOLDERS` with them.
 - `file_save_as.save()`'s VOID update (`SET [status] = 'VOID'`) targets a
   column the live `ODC_scrape_data` does not have (confirmed via
   `INFORMATION_SCHEMA.COLUMNS` on `Titan_INSE`, recorded in
@@ -321,6 +337,19 @@ entry point of its own.
   entry.
 
 ## Change Log
+- 2026-10-05: v0.10.0 - MINOR. New `sftp_upload` module (see CHANGELOG)
+  and the `paramiko` dependency. Purely additive: no existing signature
+  changed. Enabled per client by `config["sftp"]["clients"]`, deliberately
+  not by an `ODC_jobs` column (the developer expects SFTP to replace PDF
+  Auto, so no schema is added for it). `ODC_scrape_data` has no `status`
+  column, so `pending_files()` judges VOID by file size (< 1 KB) for both
+  tables rather than querying status.
+  - Also fixes PDF Auto copies landing in `{base}\prod\PDFAuto` instead of the
+    `{base}\LIVE\PDFAuto` path the stored procedure queues (see Known Gotchas).
+    `pdf_auto_copy.copy()` maps env through `_ENV_FOLDERS` and verifies each copy,
+    raising the new `PdfAutoCopyError`. The 80 stranded files were copied from
+    `prod` to `LIVE` by hand on 2026-10-05. Bots get the fix only once re-pinned
+    to v0.10.0.
 - 2026-10-01: v0.9.0 - MINOR release of the two entries below (the new
   `grab_all` module and the `pdf_auto_copy` UNC default). Purely additive:
   no existing signature changed. Cut once the grab-all schema existed on
@@ -811,6 +840,13 @@ entry point of its own.
   does not exist and made the documented `pip install` URLs 404).
 
 ## Outstanding TODOs
+- Requeue the 80 `ODC_job_details_pdfauto` rows left `Upload Failed` by the
+  `prod`/`LIVE` folder mismatch (ids 3180, 3950-4028). Their files were copied
+  to the queued `LIVE\PDFAuto` paths on 2026-10-05. The rows need the
+  pending-upload status Node-RED watches for (`Pending` or `Upload Pending` per
+  `spODC_job_details_pdfauto_UpdateStatus`; not yet confirmed).
+  `{base}\prod\PDFAuto` still holds 1,223 historical copies and can be cleared
+  once those uploads are confirmed.
 - **Done (2026-10-01)**: `v0.9.0` is pinned in all 17 supplier bots (every
   `automation-odc-*` repo except `mi-report`, `accounts-and-jobs-refresh`
   and `pdf-auto`, which were left on their own pins). Before committing,
