@@ -1,7 +1,8 @@
 """Check whether an invoice has already been recorded in ODC_scrape_data.
 
-Fuller than a plain scrape_data lookup: "inspired plc" client accounts are
-also cross-checked against ODC_scrape_accounts/web_scrape_data (a client_name
+Fuller than a plain scrape_data lookup: "inspired plc" and "ignite" client
+accounts (0.11.0: Ignite follows the Inspired PLC process exactly) are also
+cross-checked against ODC_scrape_accounts/web_scrape_data (a client_name
 that spans both a newer scrape_data pipeline and an older web_scrape_data
 table), since those two tables can each independently already hold the record.
 """
@@ -14,7 +15,9 @@ from . import db
 
 logger = logging.getLogger(__name__)
 
-_INSPIRED_PLC = "inspired plc"
+#: Clients that take the Inspired PLC path. Keep in step with
+#: file_allocation._INSPIRED_PROCESS_CLIENTS.
+_INSPIRED_PROCESS_CLIENTS = frozenset({"inspired plc", "ignite"})
 
 _CHECK_STANDARD = """
 SELECT COUNT(s.[unique_file_ref])
@@ -38,7 +41,7 @@ FROM (
                                   AND d.account_reference = s.account_reference
     JOIN   {scrape_accounts} AS a ON d.scrape_accounts_id = a.id
     WHERE  s.zip_address IS NULL
-    AND    a.client_name = 'Inspired PLC'
+    AND    a.client_name = ?
 
     UNION ALL
 
@@ -60,14 +63,17 @@ def is_duplicate(
     dsn: str,
 ) -> bool:
     """Return True if this account_reference/supplier/unique_file_ref already exists."""
-    if (client_name or "").lower() == _INSPIRED_PLC:
+    if (client_name or "").strip().lower() in _INSPIRED_PROCESS_CLIENTS:
         sql = _CHECK_INSPIRED.format(
             scrape_data=tables["scrape_data"],
             job_details=tables["job_details"],
             scrape_accounts=tables["scrape_accounts"],
             web_scrape_data=tables["web_scrape_data"],
         )
-        params = (account_reference, supplier, unique_file_ref)
+        # client_name is a parameter, not the old hardcoded 'Inspired PLC'
+        # literal; the database collation is case-insensitive, so casing in
+        # ODC_scrape_accounts does not matter.
+        params = (client_name, account_reference, supplier, unique_file_ref)
     else:
         sql = _CHECK_STANDARD.format(
             jobs=tables["jobs"],

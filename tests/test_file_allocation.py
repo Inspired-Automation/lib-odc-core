@@ -92,6 +92,39 @@ def test_allocate_inspired_plc_client(tmp_path):
     assert (tmp_path / "Acme Ltd" / "INVOICE" / "NEW" / "Elec").exists()
 
 
+def test_allocate_ignite_client_uses_customer_folder(tmp_path):
+    config = {
+        "file_allocation": {
+            "doc_types": ["INVOICE"],
+            "statuses": ["NEW"],
+            "utilities": ["Elec"],
+        },
+        "sugar": {"dsn": "Sugar Corp"},
+    }
+
+    result = file_allocation.allocate(
+        client_name="Ignite",
+        customer_name="Primark",
+        account_reference="ACC123",
+        supplier="Crown",
+        client_location=str(tmp_path),
+        utility="Electricity",
+        meter_number="M001",
+        doc_type="I",
+        bill_date_corrected="2026-07-01",
+        file_extension="pdf",
+        invoice_number="INV1",
+        config=config,
+        sug_internal_id=None,
+    )
+
+    folder = tmp_path / "Primark" / "INVOICE" / "NEW" / "Elec"
+    assert result["folder_location"] == str(folder)
+    assert result["client_filepath"] == str(folder / "Crown_ACC123_Elec_INV1_20260701.pdf")
+    assert folder.exists()
+    assert (tmp_path / "Primark" / "sugar_id.txt").exists()
+
+
 @patch("odc_core.file_allocation.sugar_client.get_company_name")
 def test_allocate_inspired_plc_uses_sugar_company_name(mock_get_company_name, tmp_path):
     mock_get_company_name.return_value = "Real Sugar Company Ltd"

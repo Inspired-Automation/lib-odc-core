@@ -56,6 +56,23 @@ def test_is_duplicate_inspired_plc_uses_union_query(mock_connect):
     sql = cursor.execute.call_args.args[0]
     assert "UNION ALL" in sql
     assert "ODC_scrape_accounts" in sql
+    assert "'Inspired PLC'" not in sql
+    assert cursor.execute.call_args.args[1:] == ("Inspired PLC", "ACC1", "Crown", "REF1")
+
+
+@patch("odc_core.db.pyodbc.connect")
+def test_is_duplicate_ignite_uses_inspired_union_query(mock_connect):
+    conn, cursor = _connect_mock((0,))
+    mock_connect.return_value = conn
+
+    result = duplicate_check.is_duplicate(
+        "ACC1", "Crown", "Ignite", "REF1", TABLES, "Jupiter"
+    )
+
+    assert result is False
+    sql = cursor.execute.call_args.args[0]
+    assert "UNION ALL" in sql
+    assert cursor.execute.call_args.args[1:] == ("Ignite", "ACC1", "Crown", "REF1")
 
 
 @patch("odc_core.db.pyodbc.connect")

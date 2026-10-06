@@ -10,7 +10,12 @@ from . import sugar_client
 
 logger = logging.getLogger(__name__)
 
-_INSPIRED_PLC = "inspired plc"
+#: Clients that take the Inspired PLC path: per-customer folders
+#: (`{client_location}\{company}\{doc_type}\NEW\{utility}`) rather than the
+#: flat monthly folder. Keep in step with duplicate_check._INSPIRED_PROCESS_CLIENTS.
+#: Ignite (0.11.0) has no `sug_internal_id` on any account,
+#: so its company folder always falls back to `customer_name`.
+_INSPIRED_PROCESS_CLIENTS = frozenset({"inspired plc", "ignite"})
 
 
 def _normalise_utility(utility: str) -> str:
@@ -77,8 +82,9 @@ def allocate(
     """
     Determine the full file path and folder structure for a downloaded invoice.
 
-    For Inspired PLC, the company folder is named from the SugarCRM account
-    resolved via `sug_internal_id`, not the free-text `customer_name`.
+    For Inspired PLC and Ignite, files go into a per-customer folder named from
+    the SugarCRM account resolved via `sug_internal_id`, falling back to the
+    free-text `customer_name` (always the case for Ignite today).
 
     Returns a dict with keys:
         folder_location   - directory where the file will be saved
@@ -91,7 +97,7 @@ def allocate(
 
     bill_date_yyyymmdd = (bill_date_corrected or "").replace("-", "")
 
-    is_inspired = (client_name or "").lower() == _INSPIRED_PLC
+    is_inspired = (client_name or "").strip().lower() in _INSPIRED_PROCESS_CLIENTS
 
     if is_inspired:
         company_name = _resolve_inspired_company_name(customer_name, sug_internal_id, config)
