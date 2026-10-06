@@ -80,7 +80,8 @@ for detail in job_details:
   still-unverified details (exact file schema/atomicity, crash-path
   teardown guarantee).
 - `file_allocation.py` - work out the target folder/filename for a downloaded
-  invoice from `ODC_jobs`/`ODC_job_details` fields. For Inspired PLC, resolves
+  invoice from `ODC_jobs`/`ODC_job_details` fields. For Inspired PLC (and
+  Ignite, which follows the same process), resolves
   the company folder name from SugarCRM via `sugar_client` and `sug_internal_id`
   rather than trusting the free-text `customer_name`.
 - `sugar_client.py` - `get_company_name()`: look up a SugarCRM account name by
@@ -97,7 +98,7 @@ for detail in job_details:
   equivalent for `ODC_grab_all_data`'s own column set).
 - `duplicate_check.py` - `is_duplicate()`: has this invoice already been
   recorded? Standard suppliers check `ODC_scrape_data` directly; `client_name
-  == "inspired plc"` accounts are also cross-checked against
+  == "inspired plc"` and `"ignite"` accounts are also cross-checked against
   `ODC_scrape_accounts`/`web_scrape_data` (an older parallel pipeline for
   that client). Call this before downloading a document, not after.
 - `validate_username.py` - `validate()`: basic sanity check that a portal

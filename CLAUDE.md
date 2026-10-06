@@ -121,9 +121,11 @@ entry point of its own.
   under 1 KB (treated as a failed/empty download).
 - `duplicate_check.is_duplicate()` must be called before downloading a
   document, not after - callers skip the download entirely when it returns
-  True. `client_name == "inspired plc"` accounts take a different query path
+  True. `client_name == "inspired plc"` and (0.11.0) `"ignite"` accounts take a different query path
   (checks `scrape_accounts`/`web_scrape_data` too) than every other client.
-- File allocation for `client_name == "inspired plc"` (added 0.7.0) names the
+- File allocation for `client_name == "inspired plc"` (added 0.7.0; Ignite
+  too since 0.11.0, which always falls back to `customer_name` - it has no
+  `sug_internal_id`) names the
   company folder from the SugarCRM account name resolved via
   `sug_internal_id` (fetched by `jobstodo.get_job_details()`'s join to
   `ODC_scrape_accounts`), not from the free-text `ODC_job_details.customer_name`.
@@ -212,11 +214,14 @@ entry point of its own.
   never reads (the target directory is derived from `target_path`). Left in
   place because removing it breaks every caller's signature; drop it at the
   next MAJOR version.
-- `duplicate_check._CHECK_INSPIRED` hardcodes the literal
-  `a.client_name = 'Inspired PLC'` while the branch that selects it lowercases
-  the caller's `client_name`. If `ODC_scrape_accounts` ever stores a different
-  casing or spelling, the query silently returns zero matches and the document
+- `duplicate_check._CHECK_INSPIRED` binds the caller's `client_name` (0.11.0;
+  it used to hardcode `'Inspired PLC'`). Casing no longer matters (the Titan
+  collation is case-insensitive), but a different spelling in
+  `ODC_scrape_accounts` still silently returns zero matches and the document
   is re-downloaded rather than skipped.
+- The Inspired-process client set is duplicated as `_INSPIRED_PROCESS_CLIENTS`
+  in both `file_allocation` and `duplicate_check`. Adding a client to one and
+  not the other splits its filing from its duplicate check.
 - `graph_client.read_otp_code()` calls `_acquire_token()` on every poll
   iteration, so a full 3600s wait at the default 10s interval requests ~360
   Graph tokens. Works, but acquire-once-and-refresh would be cheaper.
@@ -337,6 +342,22 @@ entry point of its own.
   entry.
 
 ## Change Log
+- 2026-10-06: v0.11.0 - MINOR. Ignite follows the Inspired PLC process
+  exactly (the developer's decision): `file_allocation` and
+  `duplicate_check` both select the Inspired path via a shared
+  `_INSPIRED_PROCESS_CLIENTS` set (`{"inspired plc", "ignite"}`), kept in step
+  by hand in both modules. Ignite (live `ODC_jobs`, `X:\POST RECEIVED`, same
+  root as Inspired PLC; 1,806 accounts across 7 customers) has no
+  `sug_internal_id` on any `ODC_scrape_accounts` row, so its company folder
+  always falls back to `customer_name` and `sugar_id.txt` is written empty.
+  Ignite filenames lose the meter number, as Inspired PLC's do.
+  `_CHECK_INSPIRED` now binds `client_name` instead of the hardcoded
+  `'Inspired PLC'` literal; checked read-only on live `Titan_INSE` that it
+  returns the same result for a recent Inspired PLC invoice (in either
+  casing) and finds a recent Ignite one. No supplier bot needs a code change;
+  each picks this up when re-pinned. The two Inspired PLC special cases
+  outside this library (accounts-and-jobs-refresh's Nav step, mi-report's
+  email footer) are not part of the download process and were left alone.
 - 2026-10-05: v0.10.0 - MINOR. New `sftp_upload` module (see CHANGELOG)
   and the `paramiko` dependency. Purely additive: no existing signature
   changed. Enabled per client by `config["sftp"]["clients"]`, deliberately

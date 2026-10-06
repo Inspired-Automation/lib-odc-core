@@ -5,6 +5,24 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.11.0] - 2026-10-06
+### Changed
+- Ignite now follows the Inspired PLC process exactly.
+  `file_allocation.allocate()` files Ignite invoices into per-customer folders
+  (`{client_location}\{company}\{INVOICE|LETTER}\NEW\{utility}`, the
+  Inspired PLC filename without meter number, full folder tree and
+  `sugar_id.txt`) instead of the flat monthly folder. No Ignite account has a
+  `sug_internal_id`, so the company folder is named from `customer_name` and
+  `sugar_id.txt` is empty.
+- `duplicate_check.is_duplicate()` sends Ignite through the Inspired PLC
+  query (`ODC_scrape_data` via `ODC_scrape_accounts`, plus `web_scrape_data`).
+
+### Fixed
+- `duplicate_check`'s Inspired PLC query hardcoded
+  `a.client_name = 'Inspired PLC'`; it now binds the caller's `client_name`.
+  The Titan collation is case-insensitive, so Inspired PLC matching is
+  unchanged and a casing difference no longer silently misses.
+
 ## [0.10.0] - 2026-10-05
 ### Added
 - `sftp_upload` module: upload filed documents to a client's SFTP server.

@@ -324,7 +324,8 @@ is_duplicate(account_reference: str, supplier: str, client_name: str,
 download entirely when it returns `True`.
 
 - Standard clients: counts matching rows across `jobs -> job_details -> scrape_data`.
-- `client_name == "inspired plc"` (case-insensitive): counts against a
+- `client_name` of `"inspired plc"` or `"ignite"` (case-insensitive; the
+  query binds the caller's `client_name` against `scrape_accounts.client_name`): counts against a
   `UNION ALL` of `scrape_data`-derived rows (joined through `scrape_accounts`,
   `zip_address IS NULL`) and the older `web_scrape_data` pipeline, because
   either table can independently already hold the record.
@@ -342,7 +343,10 @@ Returns `{"folder_location": str, "complete_filename": str, "client_filepath": s
 where `complete_filename` excludes the extension. Creates the directory tree as
 a side effect.
 
-| | Inspired PLC | Every other client |
+Ignite (0.11.0) takes the Inspired PLC column. It has no `sug_internal_id`, so
+its company folder is `customer_name` and `sugar_id.txt` is empty.
+
+| | Inspired PLC, Ignite | Every other client |
 |---|---|---|
 | Folder | `{client_location}/{company_name}/{INVOICE\|LETTER}/NEW/{utility}` | `{client_location}/{YYYY-MM}` |
 | Filename | `{supplier}_{account_reference}_{utility}_{invoice_number}_{YYYYMMDD}` | `{supplier}_{account_reference}_{meter_number}_{utility}_{invoice_number}_{YYYYMMDD}` |
