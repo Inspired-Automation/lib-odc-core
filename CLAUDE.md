@@ -347,6 +347,10 @@ entry point of its own.
   entry.
 
 ## Change Log
+- 2026-10-09: v0.12.1 - PATCH. Dependency bumped to `file-allocation-core`
+  0.1.1: the customer master's `folder_missing` column became `deleted`
+  (x-drive migration 004), and deleted rows (e.g. `Abodus`, merged into
+  `ABODUS LIMITED`) are never filed into or renamed. No API change.
 - 2026-10-09: v0.12.0 - MINOR. Folder routing moved to the new shared
   `lib-file-allocation` (`file_allocation_core`, now a dependency), so every
   process filing into POST RECEIVED follows the same rules. `allocate()` keeps

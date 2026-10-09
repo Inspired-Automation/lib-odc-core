@@ -5,6 +5,13 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.12.1] - 2026-10-09
+### Changed
+- Depends on `file-allocation-core` 0.1.1, which reads
+  `XDRIVE_CUSTOMER_MASTER.deleted` (renamed from `folder_missing` by
+  automation-x-drive-post-report migration 004) and never files into or
+  renames a deleted (e.g. merged) customer row. No API change.
+
 ## [0.12.0] - 2026-10-09
 ### Added
 - Dependency on `file-allocation-core` (lib-file-allocation v0.1.0).
