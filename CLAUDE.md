@@ -219,15 +219,20 @@ entry point of its own.
   collation is case-insensitive), but a different spelling in
   `ODC_scrape_accounts` still silently returns zero matches and the document
   is re-downloaded rather than skipped.
-- The Inspired-process client set is duplicated as `_INSPIRED_PROCESS_CLIENTS`
-  in both `file_allocation` and `duplicate_check`. Adding a client to one and
-  not the other splits its filing from its duplicate check.
+- The Inspired-process client set lives in `lib-file-allocation`
+  (`file_allocation_core.routing.INSPIRED_PROCESS_CLIENTS`, 0.12.0), shared by
+  `file_allocation` and `duplicate_check` (and every other POST RECEIVED
+  filer). Add a client there, not here.
 - `graph_client.read_otp_code()` calls `_acquire_token()` on every poll
   iteration, so a full 3600s wait at the default 10s interval requests ~360
   Graph tokens. Works, but acquire-once-and-refresh would be cheaper.
-- `file_allocation` writes `sugar_id.txt` with `encoding="ansi"`, which Python
-  resolves to `mbcs`. That codec is Windows-only, so this module cannot run on
-  Linux. Fine for Control Room bots; worth knowing before any container move.
+- From 0.12.0, on a production run (`config["env"] == "prod"`) an Inspired
+  PLC filing with a `sug_internal_id` writes to
+  `Titan_INSE.dbo.XDRIVE_CUSTOMER_MASTER`/`_AUDIT` (via
+  `config["database"]["dsn"]`) and may **rename a customer folder** on the
+  share when Sugar's name has changed. Dev runs never touch the table. The
+  run-as account needs SELECT/INSERT/UPDATE on both tables. `sugar_id.txt` is
+  no longer written.
 - `jobstodo._SELECT_JOB_DETAILS`'s new join to `ODC_scrape_accounts` (0.7.0)
   is an INNER JOIN and applies to every client, not just Inspired PLC. A
   `job_details` row whose `scrape_accounts_id` has no matching
@@ -342,6 +347,20 @@ entry point of its own.
   entry.
 
 ## Change Log
+- 2026-10-09: v0.12.0 - MINOR. Folder routing moved to the new shared
+  `lib-file-allocation` (`file_allocation_core`, now a dependency), so every
+  process filing into POST RECEIVED follows the same rules. `allocate()` keeps
+  its signature and filenames. For Inspired PLC/Ignite: on a production run
+  with a `sug_internal_id`, the customer folder comes from
+  `Titan_INSE.dbo.XDRIVE_CUSTOMER_MASTER` (owned by
+  automation-x-drive-post-report), renamed first when Sugar's name has changed,
+  so a Sugar rename no longer creates a second folder; the Sugar name is made
+  safe for Windows (`/` removed, other illegal characters `-`); `sugar_id.txt`
+  is no longer written; the customer tree is built only when the destination
+  is missing; and a blank customer name raises `ValueError` instead of filing
+  loose in `client_location`. `_INSPIRED_PROCESS_CLIENTS` and
+  `_normalise_utility` are gone (use `file_allocation_core.routing`).
+  `duplicate_check` uses the shared client list.
 - 2026-10-06: v0.11.0 - MINOR. Ignite follows the Inspired PLC process
   exactly (the developer's decision): `file_allocation` and
   `duplicate_check` both select the Inspired path via a shared

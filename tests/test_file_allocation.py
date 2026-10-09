@@ -1,22 +1,25 @@
 from unittest.mock import patch
 
+import pytest
+from file_allocation_core import routing
+
 from odc_core import file_allocation
 
 
 def test_normalise_utility_elec():
-    assert file_allocation._normalise_utility("Electricity") == "Elec"
+    assert routing.normalise_utility("Electricity") == "Elec"
 
 
 def test_normalise_utility_gas():
-    assert file_allocation._normalise_utility("GAS") == "Gas"
+    assert routing.normalise_utility("GAS") == "Gas"
 
 
 def test_normalise_utility_passthrough():
-    assert file_allocation._normalise_utility("Water") == "Water"
+    assert routing.normalise_utility("Water") == "Water"
 
 
 def test_normalise_utility_none():
-    assert file_allocation._normalise_utility(None) == ""
+    assert routing.normalise_utility(None) == ""
 
 
 def test_allocate_standard_client(tmp_path):
@@ -88,7 +91,7 @@ def test_allocate_inspired_plc_client(tmp_path):
     )
 
     assert "NEW" in result["folder_location"]
-    assert (tmp_path / "Acme Ltd" / "sugar_id.txt").exists()
+    assert not (tmp_path / "Acme Ltd" / "sugar_id.txt").exists()
     assert (tmp_path / "Acme Ltd" / "INVOICE" / "NEW" / "Elec").exists()
 
 
@@ -122,7 +125,7 @@ def test_allocate_ignite_client_uses_customer_folder(tmp_path):
     assert result["folder_location"] == str(folder)
     assert result["client_filepath"] == str(folder / "Crown_ACC123_Elec_INV1_20260701.pdf")
     assert folder.exists()
-    assert (tmp_path / "Primark" / "sugar_id.txt").exists()
+    assert not (tmp_path / "Primark" / "sugar_id.txt").exists()
 
 
 @patch("odc_core.file_allocation.sugar_client.get_company_name")
@@ -157,9 +160,7 @@ def test_allocate_inspired_plc_uses_sugar_company_name(mock_get_company_name, tm
     assert "Real Sugar Company Ltd" in result["folder_location"]
     assert "Acme Ltd" not in result["folder_location"]
     assert not (tmp_path / "Acme Ltd").exists()
-    sugar_id_file = tmp_path / "Real Sugar Company Ltd" / "sugar_id.txt"
-    assert sugar_id_file.exists()
-    assert sugar_id_file.read_text(encoding="ansi") == "SUGAR123"
+    assert not (tmp_path / "Real Sugar Company Ltd" / "sugar_id.txt").exists()
 
 
 @patch("odc_core.file_allocation.sugar_client.get_company_name")
@@ -191,3 +192,67 @@ def test_allocate_inspired_plc_falls_back_when_sugar_lookup_misses(mock_get_comp
     )
 
     assert "Acme Ltd" in result["folder_location"]
+
+
+INSPIRED_CONFIG = {
+    "file_allocation": {"doc_types": ["INVOICE"], "statuses": ["NEW"], "utilities": ["Elec"]},
+    "sugar": {"dsn": "Sugar Corp"},
+    "database": {"dsn": "Jupiter"},
+}
+
+
+def _allocate_inspired(tmp_path, config, sug_internal_id="SUGAR123"):
+    return file_allocation.allocate(
+        client_name="Inspired PLC",
+        customer_name="Acme Ltd",
+        account_reference="ACC123",
+        supplier="Crown",
+        client_location=str(tmp_path),
+        utility="Electricity",
+        meter_number="M001",
+        doc_type="I",
+        bill_date_corrected="2026-07-01",
+        file_extension="pdf",
+        invoice_number="INV1",
+        config=config,
+        sug_internal_id=sug_internal_id,
+    )
+
+
+@patch("odc_core.file_allocation.sugar_client.get_company_name", return_value="Sugar Name Ltd")
+@patch("file_allocation_core.routing.resolve_customer_folder", return_value="Folder The Table Holds")
+def test_prod_run_files_into_customer_master_folder(mock_resolve, _mock_name, tmp_path):
+    result = _allocate_inspired(tmp_path, {**INSPIRED_CONFIG, "env": "prod"})
+
+    mock_resolve.assert_called_once_with(
+        tmp_path, "SUGAR123", "Sugar Name Ltd", "odc", dsn="Jupiter"
+    )
+    assert result["folder_location"] == str(
+        tmp_path / "Folder The Table Holds" / "INVOICE" / "NEW" / "Elec"
+    )
+
+
+@patch("odc_core.file_allocation.sugar_client.get_company_name", return_value="Sugar Name Ltd")
+@patch("file_allocation_core.routing.resolve_customer_folder")
+def test_dev_run_never_touches_customer_master(mock_resolve, _mock_name, tmp_path):
+    result = _allocate_inspired(tmp_path, {**INSPIRED_CONFIG, "env": "dev"})
+
+    mock_resolve.assert_not_called()
+    assert "Sugar Name Ltd" in result["folder_location"]
+
+
+@patch("odc_core.file_allocation.sugar_client.get_company_name", return_value="A/B: Co")
+def test_sugar_name_made_safe_for_windows(_mock_name, tmp_path):
+    result = _allocate_inspired(tmp_path, INSPIRED_CONFIG)
+    assert result["folder_location"] == str(tmp_path / "AB- Co" / "INVOICE" / "NEW" / "Elec")
+
+
+def test_blank_customer_name_is_not_filed_in_root(tmp_path):
+    config = {"file_allocation": {"doc_types": ["INVOICE"], "statuses": ["NEW"], "utilities": []}}
+    with pytest.raises(ValueError):
+        file_allocation.allocate(
+            client_name="Ignite", customer_name="", account_reference="A", supplier="S",
+            client_location=str(tmp_path), utility="Gas", meter_number="M", doc_type="I",
+            bill_date_corrected="2026-07-01", file_extension="pdf", invoice_number="I",
+            config=config,
+        )

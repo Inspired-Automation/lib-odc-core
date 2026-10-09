@@ -11,13 +11,11 @@ from __future__ import annotations
 
 import logging
 
+from file_allocation_core.routing import is_inspired_client
+
 from . import db
 
 logger = logging.getLogger(__name__)
-
-#: Clients that take the Inspired PLC path. Keep in step with
-#: file_allocation._INSPIRED_PROCESS_CLIENTS.
-_INSPIRED_PROCESS_CLIENTS = frozenset({"inspired plc", "ignite"})
 
 _CHECK_STANDARD = """
 SELECT COUNT(s.[unique_file_ref])
@@ -63,7 +61,7 @@ def is_duplicate(
     dsn: str,
 ) -> bool:
     """Return True if this account_reference/supplier/unique_file_ref already exists."""
-    if (client_name or "").strip().lower() in _INSPIRED_PROCESS_CLIENTS:
+    if is_inspired_client(client_name):
         sql = _CHECK_INSPIRED.format(
             scrape_data=tables["scrape_data"],
             job_details=tables["job_details"],

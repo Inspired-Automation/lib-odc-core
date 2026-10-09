@@ -5,6 +5,26 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.12.0] - 2026-10-09
+### Added
+- Dependency on `file-allocation-core` (lib-file-allocation v0.1.0).
+### Changed
+- `file_allocation.allocate()` routes through
+  `file_allocation_core.routing.destination_folder`. Inspired PLC/Ignite files
+  with a `sug_internal_id` on a production run (`config["env"] == "prod"`) go
+  into the folder `Titan_INSE.dbo.XDRIVE_CUSTOMER_MASTER` holds for that Sugar
+  account (via `config["database"]["dsn"]`), renamed first if Sugar's name has
+  changed. Sugar names are made safe for Windows folder names. The customer
+  tree is built only when the destination folder is missing.
+- `duplicate_check` uses the shared `is_inspired_client`.
+### Removed
+- `sugar_id.txt` is no longer written.
+- `file_allocation._INSPIRED_PROCESS_CLIENTS`, `_normalise_utility`,
+  `_create_inspired_folder_structure`, `duplicate_check._INSPIRED_PROCESS_CLIENTS`.
+### Fixed
+- A blank customer name for an Inspired-process client raises `ValueError`
+  instead of building the customer tree directly in `client_location`.
+
 ## [0.11.0] - 2026-10-06
 ### Changed
 - Ignite now follows the Inspired PLC process exactly.

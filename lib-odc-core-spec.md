@@ -344,13 +344,20 @@ where `complete_filename` excludes the extension. Creates the directory tree as
 a side effect.
 
 Ignite (0.11.0) takes the Inspired PLC column. It has no `sug_internal_id`, so
-its company folder is `customer_name` and `sugar_id.txt` is empty.
+its company folder is `customer_name`.
+
+Routing is delegated to `file_allocation_core.routing.destination_folder`
+(lib-file-allocation, 0.12.0). On a production run (`config["env"] == "prod"`)
+with a `sug_internal_id`, `company_name` below is replaced by the folder
+`Titan_INSE.dbo.XDRIVE_CUSTOMER_MASTER` holds for that Sugar account, renamed
+first when Sugar's name has changed (`file_allocation_core.customer_folders`).
+Folder names are made safe for Windows (`safe_folder_name`).
 
 | | Inspired PLC, Ignite | Every other client |
 |---|---|---|
 | Folder | `{client_location}/{company_name}/{INVOICE\|LETTER}/NEW/{utility}` | `{client_location}/{YYYY-MM}` |
 | Filename | `{supplier}_{account_reference}_{utility}_{invoice_number}_{YYYYMMDD}` | `{supplier}_{account_reference}_{meter_number}_{utility}_{invoice_number}_{YYYYMMDD}` |
-| Extra | Builds the full doc_type/status/utility tree and seeds `sugar_id.txt` with `sug_internal_id` | Creates the month folder only |
+| Extra | Builds the full doc_type/status/utility tree when the destination is missing (no `sugar_id.txt` from 0.12.0) | Creates the month folder only |
 
 `doc_type == "O"` maps to `LETTER`; anything else maps to `INVOICE`. Utility is
 normalised to `Elec` or `Gas` by substring match, otherwise passed through.
