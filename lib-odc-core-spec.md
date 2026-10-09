@@ -78,13 +78,14 @@ file_allocation:
   utilities: [ELEC, WATER, GAS, OTHER]
 
 sftp:                       # 0.10.0, sftp_upload callers only
+  protocol: ftps            # 0.13.0: ftps (default) or sftp
   host:
-  port: 22
+  port: 21                  # blank = 21 for ftps, 22 for sftp
   username:                 # config.yaml / Runtime config only
   password:                 # config.yaml / Runtime config only
   remote_dir: ""
-  host_key:                 # optional; blank = trust on first use
-  known_hosts_file: config/sftp_known_hosts
+  host_key:                 # sftp only; optional; blank = trust on first use
+  known_hosts_file: config/sftp_known_hosts   # sftp only
   clients: []
   timeout_s: 60
 
@@ -525,14 +526,22 @@ with SftpSession(config) as session:      # raises SftpUploadError if it cannot 
 
 - Enabled per client by `config["sftp"]["clients"]` (case/space-insensitive
   match on `ODC_jobs.client_name`). No database column.
+- Protocol (0.13.0): `config["sftp"]["protocol"]`, `"ftps"` (default) or
+  `"sftp"`; `port` defaults to 21 or 22 to match. FTPS is explicit
+  (`AUTH TLS` on connect, `PROT P` for data, binary `TYPE I`), verifies the
+  server certificate and hostname against the system CA store, and reuses
+  the control channel's TLS session on data connections. Both protocols sit
+  behind the same small interface (`size`/`put`/`replace`/`remove`/`alive`),
+  so the upload steps below are identical.
 - `upload()`: `<name>.part` in `remote_dir` (blank = login folder), remote
-  size check, `posix_rename` (plain rename fallback), then a local
-  `<file>.uploaded` JSON sidecar (UTC time, host, remote path, size). A
+  size check, rename (SFTP: `posix_rename`, plain rename fallback; FTPS:
+  `RNFR`/`RNTO`, deleting the target first if refused), then a local
+  `<file>.uploaded` JSON sidecar (UTC time, protocol, host, remote path, size). A
   remote file of the same size counts as uploaded. One reconnect on a
   dropped connection; if that fails the session is `broken` and every later
   upload returns False. A server-side error on a live connection fails
   that file only.
-- Host keys: a configured `host_key` is the only key accepted
+- SFTP host keys: a configured `host_key` is the only key accepted
   (`RejectPolicy`). Otherwise trust-on-first-use: the first key is saved to
   `known_hosts_file` and its SHA256 fingerprint logged at WARNING; any other
   key afterwards (including a different key type) refuses the connection.

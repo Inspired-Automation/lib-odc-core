@@ -89,11 +89,15 @@ entry point of its own.
   `client_secret`, `tenant_id`, and (for `send_mail`) `sender_address`.
   Credentials are never hardcoded here - each calling project supplies them
   via its own `config.yaml`.
-- SFTP (`sftp_upload.py`): per-client upload of filed documents. Host,
-  port, username, password, remote_dir, host_key, known_hosts_file,
+- FTPS/SFTP (`sftp_upload.py`): per-client upload of filed documents.
+  Protocol (`ftps` default since 0.13.0, or `sftp`), host, port,
+  username, password, remote_dir, host_key/known_hosts_file (SFTP only),
   clients and timeout_s come from the caller's `config["sftp"]`;
   credentials only ever from `config.yaml` / the Control Room Runtime
-  config panel, never logged.
+  config panel, never logged. The client's server
+  (`ftp.daisystg.systems-link.com` for dev/staging) speaks explicit FTPS
+  on port 21; its certificate verifies against the Windows CA store, and
+  implicit FTPS (990) is closed.
 
 ## Configuration
 - This package reads no config file itself. See README.md "Expected config
@@ -347,6 +351,16 @@ entry point of its own.
   entry.
 
 ## Change Log
+- 2026-10-09: v0.13.0 - MINOR. `sftp_upload` now uploads over explicit
+  FTPS by default (`config["sftp"]["protocol"]`, `ftps` or `sftp`), because
+  FTPS is the protocol that works on both the client's dev/staging and live
+  servers. Module, class (`SftpSession`, `SftpUploadError`) and config-block
+  names are unchanged, so callers need no code change. But a `config.yaml`
+  still saying `port: 22` must move to 21 (or drop `port`). The SFTP path is
+  kept, behind `protocol: sftp`. Checked read-only against
+  `ftp.daisystg.systems-link.com` the same day: login, `PROT P` listing,
+  `SIZE` and `NOOP` all worked. A real upload (`STOR`/`RNFR`/`RNTO`) has not
+  yet been run against it.
 - 2026-10-09: v0.12.1 - PATCH. Dependency bumped to `file-allocation-core`
   0.1.1: the customer master's `folder_missing` column became `deleted`
   (x-drive migration 004), and deleted rows (e.g. `Abodus`, merged into

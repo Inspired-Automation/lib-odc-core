@@ -1,5 +1,8 @@
+import ftplib
 import json
+import ssl
 from datetime import date
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import paramiko
@@ -19,7 +22,6 @@ TABLES = {
 def _config(tmp_path, **overrides):
     cfg = {
         "host": "sftp.example.test",
-        "port": 22,
         "username": "user",
         "password": "secret",
         "remote_dir": "",
@@ -35,36 +37,35 @@ def _pdf(tmp_path, name="EI_ACC_Elec_INV1_20260930.pdf", size=2048):
     return path
 
 
-def _session_with_fake_sftp(tmp_path, remote_files=None, **cfg):
-    """An SftpSession whose connection is a fake in-memory SFTP server."""
-    remote = dict(remote_files or {})
-    sftp = MagicMock()
+class _FakeConnection:
+    """In-memory server behind the interface SftpSession uploads through."""
 
-    def stat(path):
-        if path not in remote:
-            raise FileNotFoundError(path)
-        return MagicMock(st_size=remote[path])
+    def __init__(self, remote_files=None):
+        self.remote = dict(remote_files or {})
+        self.put = MagicMock(side_effect=self._put)
+        self.replace = MagicMock(side_effect=self._replace)
 
-    def put(local, path, confirm=False):
-        remote[path] = len(open(local, "rb").read())
+    def alive(self):
+        return True
 
-    def posix_rename(src, dst):
-        remote[dst] = remote.pop(src)
+    def size(self, path):
+        return self.remote.get(path)
 
-    sftp.stat.side_effect = stat
-    sftp.put.side_effect = put
-    sftp.posix_rename.side_effect = posix_rename
-    def remove(path):
-        if path not in remote:
-            raise FileNotFoundError(path)  # what paramiko raises for ENOENT
-        del remote[path]
+    def _put(self, local, path):
+        self.remote[path] = Path(local).stat().st_size
 
-    sftp.remove.side_effect = remove
+    def _replace(self, src, dst):
+        self.remote[dst] = self.remote.pop(src)
 
+    def remove(self, path):
+        del self.remote[path]
+
+
+def _session_with_fake_server(tmp_path, remote_files=None, **cfg):
     session = SftpSession(_config(tmp_path, **cfg))
-    session._sftp = sftp
-    session._alive = lambda: True
-    return session, sftp, remote
+    conn = _FakeConnection(remote_files)
+    session._conn = conn
+    return session, conn
 
 
 # ---------------------------------------------------------------- is_enabled_for
@@ -82,87 +83,125 @@ def test_is_enabled_for_missing_block_or_blank_client():
     assert sftp_upload.is_enabled_for("", {"sftp": {"clients": ["Horizon"]}}) is False
 
 
+# ---------------------------------------------------------------- protocol choice
+
+def test_protocol_defaults_to_ftps_on_port_21(tmp_path):
+    session = SftpSession(_config(tmp_path))
+    assert session.protocol == "ftps"
+    assert session.port == 21
+    assert isinstance(session._conn, sftp_upload._FtpsConnection)
+
+
+def test_protocol_sftp_defaults_to_port_22(tmp_path):
+    session = SftpSession(_config(tmp_path, protocol=" SFTP "))
+    assert session.protocol == "sftp"
+    assert session.port == 22
+    assert isinstance(session._conn, sftp_upload._SftpConnection)
+
+
+def test_explicit_port_wins(tmp_path):
+    assert SftpSession(_config(tmp_path, port=2121)).port == 2121
+
+
+def test_unknown_protocol_is_rejected(tmp_path):
+    with pytest.raises(SftpUploadError, match="sftp.protocol"):
+        SftpSession(_config(tmp_path, protocol="ftp"))
+
+
 # ------------------------------------------------------------------------ upload
 
 def test_upload_writes_part_then_renames_and_writes_sidecar(tmp_path):
     local = _pdf(tmp_path)
-    session, sftp, remote = _session_with_fake_sftp(tmp_path)
+    session, conn = _session_with_fake_server(tmp_path)
 
     assert session.upload(local) is True
 
-    sftp.put.assert_called_once_with(str(local), local.name + ".part", confirm=False)
-    sftp.posix_rename.assert_called_once_with(local.name + ".part", local.name)
-    assert remote == {local.name: 2048}
+    conn.put.assert_called_once_with(local, local.name + ".part")
+    conn.replace.assert_called_once_with(local.name + ".part", local.name)
+    assert conn.remote == {local.name: 2048}
     record = json.loads(sftp_upload.sidecar_path(local).read_text(encoding="utf-8"))
     assert record["remote_path"] == local.name
     assert record["size"] == 2048
+    assert record["protocol"] == "ftps"
     assert "secret" not in sftp_upload.sidecar_path(local).read_text(encoding="utf-8")
 
 
 def test_upload_uses_remote_dir(tmp_path):
     local = _pdf(tmp_path)
-    session, _, remote = _session_with_fake_sftp(tmp_path, remote_dir="inbound/invoices")
+    session, conn = _session_with_fake_server(tmp_path, remote_dir="inbound/invoices")
 
     assert session.upload(local) is True
-    assert remote == {f"inbound/invoices/{local.name}": 2048}
+    assert conn.remote == {f"inbound/invoices/{local.name}": 2048}
 
 
 def test_upload_existing_same_size_is_done_without_put(tmp_path):
     local = _pdf(tmp_path)
-    session, sftp, _ = _session_with_fake_sftp(tmp_path, remote_files={local.name: 2048})
+    session, conn = _session_with_fake_server(tmp_path, remote_files={local.name: 2048})
 
     assert session.upload(local) is True
-    sftp.put.assert_not_called()
+    conn.put.assert_not_called()
     assert sftp_upload.is_uploaded(local)
 
 
 def test_upload_existing_different_size_is_replaced(tmp_path):
     local = _pdf(tmp_path)
-    session, sftp, remote = _session_with_fake_sftp(tmp_path, remote_files={local.name: 10})
+    session, conn = _session_with_fake_server(tmp_path, remote_files={local.name: 10})
 
     assert session.upload(local) is True
-    sftp.put.assert_called_once()
-    assert remote[local.name] == 2048
+    conn.put.assert_called_once()
+    assert conn.remote[local.name] == 2048
 
 
 def test_upload_size_mismatch_removes_part_and_fails(tmp_path):
     local = _pdf(tmp_path)
-    session, sftp, remote = _session_with_fake_sftp(tmp_path)
-    sftp.put.side_effect = lambda local_path, path, confirm=False: remote.__setitem__(path, 1)
+    session, conn = _session_with_fake_server(tmp_path)
+    conn.put.side_effect = lambda local_path, path: conn.remote.__setitem__(path, 1)
 
     assert session.upload(local) is False
-    assert remote == {}
+    assert conn.remote == {}
     assert not sftp_upload.is_uploaded(local)
-
-
-def test_upload_falls_back_to_rename_without_posix_rename(tmp_path):
-    local = _pdf(tmp_path)
-    session, sftp, remote = _session_with_fake_sftp(tmp_path)
-    sftp.posix_rename.side_effect = OSError("unsupported")
-    sftp.rename.side_effect = lambda src, dst: remote.__setitem__(dst, remote.pop(src))
-
-    assert session.upload(local) is True
-    assert remote == {local.name: 2048}
 
 
 def test_upload_skips_file_with_sidecar(tmp_path):
     local = _pdf(tmp_path)
     sftp_upload.sidecar_path(local).write_text("{}", encoding="utf-8")
-    session, sftp, _ = _session_with_fake_sftp(tmp_path)
+    session, conn = _session_with_fake_server(tmp_path)
 
     assert session.upload(local) is True
-    sftp.put.assert_not_called()
+    conn.put.assert_not_called()
 
 
-def test_upload_server_error_on_live_connection_fails_without_reconnect(tmp_path):
+@pytest.mark.parametrize("error", [PermissionError("denied"), ftplib.error_perm("553 Not allowed")])
+def test_upload_server_error_on_live_connection_fails_without_reconnect(tmp_path, error):
     local = _pdf(tmp_path)
-    session, sftp, _ = _session_with_fake_sftp(tmp_path)
-    sftp.put.side_effect = PermissionError("denied")
+    session, conn = _session_with_fake_server(tmp_path)
+    conn.put.side_effect = error
     session.connect = MagicMock()
 
     assert session.upload(local) is False
     session.connect.assert_not_called()
     assert session.broken is False
+
+
+def test_upload_reconnects_once_after_dropped_connection(tmp_path):
+    local = _pdf(tmp_path)
+    session, conn = _session_with_fake_server(tmp_path)
+    state = {"alive": True}
+    conn.alive = lambda: state["alive"]
+
+    def drop_then_work(local_path, path):
+        if conn.put.call_count == 1:
+            state["alive"] = False
+            raise EOFError("connection closed")
+        conn._put(local_path, path)
+
+    conn.put.side_effect = drop_then_work
+    session.close = MagicMock()
+    session.connect = MagicMock(side_effect=lambda: state.update(alive=True))
+
+    assert session.upload(local) is True
+    session.connect.assert_called_once()
+    assert conn.remote == {local.name: 2048}
 
 
 def test_broken_session_after_failed_reconnect(tmp_path):
@@ -180,6 +219,117 @@ def test_broken_session_after_failed_reconnect(tmp_path):
 def test_connect_requires_credentials(tmp_path):
     with pytest.raises(SftpUploadError, match="sftp.password"):
         SftpSession(_config(tmp_path, password="")).connect()
+
+
+# ---------------------------------------------------------------- FTPS connection
+
+@pytest.fixture
+def ftp_cls():
+    with patch.object(sftp_upload, "_SessionReuseFTP_TLS") as cls:
+        yield cls
+
+
+def test_ftps_connect_logs_in_over_tls_and_protects_data(tmp_path, ftp_cls):
+    session = SftpSession(_config(tmp_path, port=2121, timeout_s=15))
+    session.connect()
+
+    ftp = ftp_cls.return_value
+    context = ftp_cls.call_args.kwargs["context"]
+    assert context.verify_mode == ssl.CERT_REQUIRED and context.check_hostname is True
+    assert ftp_cls.call_args.kwargs["timeout"] == 15
+    ftp.connect.assert_called_once_with("sftp.example.test", 2121)
+    ftp.login.assert_called_once_with("user", "secret")
+    ftp.prot_p.assert_called_once()
+    ftp.voidcmd.assert_called_with("TYPE I")
+
+
+def test_ftps_bad_login_raises_clear_error(tmp_path, ftp_cls):
+    ftp_cls.return_value.login.side_effect = ftplib.error_perm("530 Access denied.")
+    with pytest.raises(SftpUploadError, match="rejected"):
+        SftpSession(_config(tmp_path)).connect()
+    ftp_cls.return_value.close.assert_called_once()
+
+
+def test_ftps_untrusted_certificate_raises_clear_error(tmp_path, ftp_cls):
+    exc = ssl.SSLCertVerificationError("cert")
+    exc.verify_message = "self-signed certificate"
+    ftp_cls.return_value.login.side_effect = exc
+    with pytest.raises(SftpUploadError, match="not trusted.*self-signed"):
+        SftpSession(_config(tmp_path)).connect()
+
+
+def test_ftps_network_error_raises(tmp_path, ftp_cls):
+    ftp_cls.return_value.connect.side_effect = TimeoutError("timed out")
+    with pytest.raises(SftpUploadError, match="FTPS connection .* failed"):
+        SftpSession(_config(tmp_path)).connect()
+
+
+def _ftps_conn():
+    conn = sftp_upload._FtpsConnection("h", 21, "u", "p", 5)
+    conn._ftp = MagicMock()
+    return conn, conn._ftp
+
+
+def test_ftps_size_missing_file_is_none():
+    conn, ftp = _ftps_conn()
+    ftp.size.side_effect = ftplib.error_perm("550 No such file")
+    assert conn.size("a.pdf") is None
+    ftp.size.side_effect = None
+    ftp.size.return_value = 2048
+    assert conn.size("a.pdf") == 2048
+
+
+def test_ftps_put_stores_binary(tmp_path):
+    conn, ftp = _ftps_conn()
+    conn.put(_pdf(tmp_path), "a.pdf.part")
+    assert ftp.storbinary.call_args.args[0] == "STOR a.pdf.part"
+
+
+def test_ftps_replace_deletes_target_when_rename_refused():
+    conn, ftp = _ftps_conn()
+    ftp.rename.side_effect = [ftplib.error_perm("553 exists"), None]
+    conn.replace("a.part", "a")
+    ftp.delete.assert_called_once_with("a")
+    assert ftp.rename.call_count == 2
+
+
+def test_ftps_alive_uses_noop():
+    conn, ftp = _ftps_conn()
+    assert conn.alive() is True
+    ftp.voidcmd.side_effect = EOFError()
+    assert conn.alive() is False
+    assert sftp_upload._FtpsConnection("h", 21, "u", "p", 5).alive() is False
+
+
+def test_ftps_data_connection_reuses_control_tls_session():
+    ftp = sftp_upload._SessionReuseFTP_TLS()
+    ftp.host = "h"
+    ftp._prot_p = True
+    ftp.sock = MagicMock()
+    ftp.context = MagicMock()
+    raw = MagicMock()
+    with patch.object(ftplib.FTP, "ntransfercmd", return_value=(raw, None)):
+        conn, _ = ftp.ntransfercmd("STOR x")
+    ftp.context.wrap_socket.assert_called_once_with(raw, server_hostname="h", session=ftp.sock.session)
+    assert conn is ftp.context.wrap_socket.return_value
+
+
+# ---------------------------------------------------------------- SFTP connection
+
+def test_sftp_replace_falls_back_to_rename_without_posix_rename():
+    conn = sftp_upload._SftpConnection("h", 22, "u", "p", 5, {})
+    conn._sftp = MagicMock()
+    conn._sftp.posix_rename.side_effect = OSError("unsupported")
+    conn._sftp.remove.side_effect = FileNotFoundError("a")
+    conn.replace("a.part", "a")
+    conn._sftp.rename.assert_called_once_with("a.part", "a")
+
+
+def test_sftp_size_missing_file_is_none():
+    conn = sftp_upload._SftpConnection("h", 22, "u", "p", 5, {})
+    conn._sftp = MagicMock()
+    conn._sftp.stat.side_effect = FileNotFoundError("a")
+    assert conn.size("a") is None
 
 
 # ---------------------------------------------------------------- host keys (real keys)
@@ -226,7 +376,7 @@ def test_parse_host_key_rejects_garbage():
 
 def test_connect_with_pinned_host_key_uses_reject_policy(tmp_path, rsa_keys):
     key, _ = rsa_keys
-    session = SftpSession(_config(tmp_path, host_key=f"{key.get_name()} {key.get_base64()}"))
+    session = SftpSession(_config(tmp_path, protocol="sftp", host_key=f"{key.get_name()} {key.get_base64()}"))
     with patch.object(paramiko, "SSHClient") as client_cls:
         client = client_cls.return_value
         session.connect()
@@ -238,7 +388,7 @@ def test_connect_with_pinned_host_key_uses_reject_policy(tmp_path, rsa_keys):
 
 def test_connect_bad_host_key_raises_clear_error(tmp_path, rsa_keys):
     key, other = rsa_keys
-    session = SftpSession(_config(tmp_path))
+    session = SftpSession(_config(tmp_path, protocol="sftp"))
     with patch.object(paramiko, "SSHClient") as client_cls:
         client_cls.return_value.connect.side_effect = paramiko.BadHostKeyException("sftp.example.test", other, key)
         with pytest.raises(SftpUploadError, match="changed"):

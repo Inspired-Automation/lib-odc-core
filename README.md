@@ -106,10 +106,12 @@ for detail in job_details:
 - `updatejobdetails.py` - call `spODC_job_details_UpdateStatus`.
 - `pdf_auto_copy.py` - copy a filed invoice into the PDF Auto drop folder
   when a job's `pdf_auto` flag is set.
-- `sftp_upload.py` - upload filed documents to a client's SFTP server
-  when the job's client is in `config["sftp"]["clients"]`. Atomic upload
-  (`.part` then rename), `<file>.uploaded` sidecar, trust-on-first-use
-  host-key pinning, and `pending_files()` for a next-run sweep. (0.10.0)
+- `sftp_upload.py` - upload filed documents to a client's server over
+  FTPS (default, 0.13.0) or SFTP when the job's client is in
+  `config["sftp"]["clients"]`. Atomic upload (`.part` then rename),
+  `<file>.uploaded` sidecar, certificate verification (FTPS) or
+  trust-on-first-use host-key pinning (SFTP), and `pending_files()` for a
+  next-run sweep. (0.10.0)
 - `graph_client.py` - Microsoft Graph helpers: `send_mail()` and
   `read_otp_code()` (polls a mailbox for a passwordless-login OTP email).
   Both read `client_id`/`client_secret`/`tenant_id`/`sender_address` from a
@@ -176,13 +178,14 @@ file_allocation:
 # sftp_upload callers only. username/password belong in config.yaml /
 # the Runtime config panel, never in a committed template.
 sftp:
+  protocol: ftps          # ftps (explicit, AUTH TLS) or sftp
   host:
-  port: 22
+  port: 21                # blank = 21 for ftps, 22 for sftp
   username:
   password:
   remote_dir: ""          # blank = the login folder
-  host_key:               # optional "<type> <base64>"; blank = trust on first use
-  known_hosts_file: config/sftp_known_hosts
+  host_key:               # sftp only: optional "<type> <base64>"; blank = trust on first use
+  known_hosts_file: config/sftp_known_hosts   # sftp only
   clients: []             # client_name values whose files are uploaded
   timeout_s: 60
 ```

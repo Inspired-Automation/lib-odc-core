@@ -5,6 +5,23 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.13.0] - 2026-10-09
+### Added
+- `sftp_upload` speaks explicit FTPS (`AUTH TLS`, then `PROT P`, via
+  `ftplib.FTP_TLS`), selected by the new `config["sftp"]["protocol"]`
+  (`"ftps"` or `"sftp"`). The server certificate is verified against the
+  system CA store with hostname checking, and data connections reuse the
+  control connection's TLS session. Upload behaviour is unchanged: `.part`,
+  size check (`SIZE`), rename (`RNFR`/`RNTO`, deleting the target first if
+  the server refuses to overwrite), sidecar. The sidecar now also records
+  `protocol`.
+### Changed
+- **`protocol` defaults to `"ftps"`**, and `port` defaults to 21 for FTPS
+  and 22 for SFTP. The client's dev/staging and live servers both accept
+  FTPS. A caller whose `config.yaml` still has `port: 22` and no `protocol`
+  must either change `port` to 21 (or remove it) or set `protocol: sftp`.
+  `host_key`/`known_hosts_file` apply to SFTP only. No signature changed.
+
 ## [0.12.1] - 2026-10-09
 ### Changed
 - Depends on `file-allocation-core` 0.1.1, which reads

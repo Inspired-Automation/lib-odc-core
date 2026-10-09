@@ -1,11 +1,17 @@
-"""Upload filed ODC documents to a client's SFTP server (0.10.0).
+"""Upload filed ODC documents to a client's file server over FTPS or SFTP.
+
+Added in 0.10.0 as SFTP only. 0.13.0 added FTPS and made it the default:
+the client's dev/staging and live servers both accept explicit FTPS
+(``AUTH TLS`` on port 21), so ``config["sftp"]["protocol"]`` is ``"ftps"``
+unless set to ``"sftp"``. The module, class and config-block names keep
+"sftp" so callers need no code change.
 
 Switched on per client by config, not by a database column: a job uploads
 when its ``client_name`` is listed in ``config["sftp"]["clients"]``. This is
 expected to replace the PDF Auto copy (``pdf_auto_copy``) for those clients
 in time; for now the two are independent.
 
-Every upload is atomic and recorded locally:
+Every upload is atomic and recorded locally, whichever protocol is used:
 
 1. upload to ``<name>.part`` in ``remote_dir`` (the login folder when blank),
 2. check the remote size matches the local file,
@@ -17,10 +23,15 @@ Anything not yet marked is picked up by ``pending_files()`` on a later run
 (the "sweep"), because a bill the duplicate check skips is never downloaded
 again and so would otherwise never be re-uploaded.
 
-Host keys are pinned, trust-on-first-use: a configured ``host_key`` wins;
-otherwise the key saved in ``known_hosts_file`` on the first connection is
-the only one accepted afterwards. A changed key refuses the connection.
-``paramiko.AutoAddPolicy`` is never used.
+FTPS: the control and data channels are both encrypted (``PROT P``) and the
+server certificate is verified against the Windows/system CA store, with
+hostname checking. Data connections reuse the control connection's TLS
+session, which many FTPS servers require.
+
+SFTP: host keys are pinned, trust-on-first-use: a configured ``host_key``
+wins; otherwise the key saved in ``known_hosts_file`` on the first
+connection is the only one accepted afterwards. A changed key refuses the
+connection. ``paramiko.AutoAddPolicy`` is never used.
 
 Credentials come only from the caller's ``config["sftp"]`` (``config.yaml`` /
 the Control Room Runtime config panel) and are never logged.
@@ -29,10 +40,12 @@ the Control Room Runtime config panel) and are never logged.
 from __future__ import annotations
 
 import base64
+import ftplib
 import hashlib
 import json
 import logging
 import posixpath
+import ssl
 from datetime import UTC, date, datetime
 from pathlib import Path
 
@@ -42,12 +55,18 @@ from . import db
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_PORT = 22
+PROTOCOL_FTPS = "ftps"
+PROTOCOL_SFTP = "sftp"
+DEFAULT_PROTOCOL = PROTOCOL_FTPS
+DEFAULT_PORTS = {PROTOCOL_FTPS: 21, PROTOCOL_SFTP: 22}
 DEFAULT_TIMEOUT_S = 60
 DEFAULT_KNOWN_HOSTS_FILE = "config/sftp_known_hosts"
 SIDECAR_SUFFIX = ".uploaded"
 PART_SUFFIX = ".part"
 _MIN_FILE_SIZE = 1024  # bytes; smaller files are VOID in file_save_as / grab_all
+
+# Errors an upload can raise from either protocol's client library.
+_TRANSFER_ERRORS = (paramiko.SSHException, ftplib.Error, EOFError, OSError)
 
 _PENDING_GRAB_ALL_SQL = """
 SELECT g.[client_file_path]
@@ -70,7 +89,7 @@ AND   s.[bill_date_corrected] >= ?
 
 
 class SftpUploadError(RuntimeError):
-    """The SFTP connection could not be made (bad config, auth, host key, network)."""
+    """The upload connection could not be made (bad config, auth, host key/certificate, network)."""
 
 
 def _normalise(value: str | None) -> str:
@@ -94,6 +113,8 @@ def is_uploaded(local_path: str | Path) -> bool:
     return sidecar_path(local_path).exists()
 
 
+# ------------------------------------------------------------------- SFTP
+
 def fingerprint(key: paramiko.PKey) -> str:
     """OpenSSH-style SHA256 fingerprint, e.g. 'SHA256:abc...'."""
     digest = hashlib.sha256(key.asbytes()).digest()
@@ -101,7 +122,7 @@ def fingerprint(key: paramiko.PKey) -> str:
 
 
 def _host_entry(host: str, port: int) -> str:
-    return host if port == DEFAULT_PORT else f"[{host}]:{port}"
+    return host if port == DEFAULT_PORTS[PROTOCOL_SFTP] else f"[{host}]:{port}"
 
 
 def _parse_host_key(value: str) -> paramiko.PKey:
@@ -144,40 +165,22 @@ class _TrustOnFirstUsePolicy(paramiko.MissingHostKeyPolicy):
         )
 
 
-class SftpSession:
-    """One SFTP connection for a run. Use as a context manager.
+class _SftpConnection:
+    """paramiko SFTP behind the small interface SftpSession uploads through."""
 
-    ``upload()`` never raises for an individual file: it returns False and
-    logs, so a failed upload never fails the bill that was just saved. After
-    one failed reconnect the session marks itself broken and every later
-    upload returns False straight away; the next run's sweep catches up.
-    """
-
-    def __init__(self, config: dict) -> None:
-        sftp_cfg = config.get("sftp") or {}
-        self.host: str = (sftp_cfg.get("host") or "").strip()
-        self.port: int = int(sftp_cfg.get("port") or DEFAULT_PORT)
-        self._username: str = sftp_cfg.get("username") or ""
-        self._password: str = sftp_cfg.get("password") or ""
-        self.remote_dir: str = (sftp_cfg.get("remote_dir") or "").strip()
+    def __init__(self, host: str, port: int, username: str, password: str, timeout_s: float, sftp_cfg: dict) -> None:
+        self._host = host
+        self._port = port
+        self._username = username
+        self._password = password
+        self._timeout_s = timeout_s
         self._host_key: str = (sftp_cfg.get("host_key") or "").strip()
         self._known_hosts = Path(sftp_cfg.get("known_hosts_file") or DEFAULT_KNOWN_HOSTS_FILE)
-        self._timeout_s = float(sftp_cfg.get("timeout_s") or DEFAULT_TIMEOUT_S)
         self._client: paramiko.SSHClient | None = None
         self._sftp: paramiko.SFTPClient | None = None
-        self.broken = False
-
-    # ---------------------------------------------------------- connection
-
-    def _check_config(self) -> None:
-        missing = [k for k, v in (("host", self.host), ("username", self._username), ("password", self._password)) if not v]
-        if missing:
-            raise SftpUploadError(f"config sftp.{', sftp.'.join(missing)} not set")
 
     def connect(self) -> None:
-        """Open the connection. Raises SftpUploadError on any failure."""
-        self._check_config()
-        entry = _host_entry(self.host, self.port)
+        entry = _host_entry(self._host, self._port)
         client = paramiko.SSHClient()
         if self._host_key:
             key = _parse_host_key(self._host_key)
@@ -189,7 +192,7 @@ class SftpSession:
             client.set_missing_host_key_policy(_TrustOnFirstUsePolicy(self._known_hosts, entry))
         try:
             client.connect(
-                self.host, port=self.port, username=self._username, password=self._password,
+                self._host, port=self._port, username=self._username, password=self._password,
                 timeout=self._timeout_s, banner_timeout=self._timeout_s, auth_timeout=self._timeout_s,
                 allow_agent=False, look_for_keys=False,
             )
@@ -210,7 +213,6 @@ class SftpSession:
             client.close()
             raise SftpUploadError(f"SFTP connection to {entry} failed: {exc}") from exc
         self._client = client
-        logger.info("SFTP_UPLOAD - connected to %s (remote dir %r)", entry, self.remote_dir or "(login folder)")
 
     def close(self) -> None:
         for closer in (self._sftp, self._client):
@@ -222,6 +224,189 @@ class SftpSession:
         self._sftp = None
         self._client = None
 
+    def alive(self) -> bool:
+        transport = self._client.get_transport() if self._client else None
+        return bool(transport and transport.is_active() and self._sftp is not None)
+
+    def size(self, path: str) -> int | None:
+        """Remote file size, or None when it does not exist."""
+        assert self._sftp is not None
+        try:
+            return self._sftp.stat(path).st_size
+        except FileNotFoundError:
+            return None
+
+    def put(self, local: Path, path: str) -> None:
+        assert self._sftp is not None
+        self._sftp.put(str(local), path, confirm=False)
+
+    def replace(self, src: str, dst: str) -> None:
+        assert self._sftp is not None
+        try:
+            self._sftp.posix_rename(src, dst)
+        except OSError:
+            # Server without the posix-rename extension: plain rename fails if the target exists.
+            try:
+                self._sftp.remove(dst)
+            except FileNotFoundError:
+                pass
+            self._sftp.rename(src, dst)
+
+    def remove(self, path: str) -> None:
+        assert self._sftp is not None
+        self._sftp.remove(path)
+
+
+# ------------------------------------------------------------------- FTPS
+
+class _SessionReuseFTP_TLS(ftplib.FTP_TLS):
+    """FTP_TLS whose data connections resume the control connection's TLS session.
+
+    Many FTPS servers refuse a data connection that does not (vsftpd's
+    require_ssl_reuse, FileZilla Server); it is harmless where not required.
+    """
+
+    def ntransfercmd(self, cmd: str, rest: int | str | None = None):
+        conn, size = ftplib.FTP.ntransfercmd(self, cmd, rest)
+        if self._prot_p:
+            conn = self.context.wrap_socket(conn, server_hostname=self.host, session=self.sock.session)
+        return conn, size
+
+
+class _FtpsConnection:
+    """Explicit FTPS (AUTH TLS, then PROT P) behind the interface SftpSession uploads through."""
+
+    def __init__(self, host: str, port: int, username: str, password: str, timeout_s: float) -> None:
+        self._host = host
+        self._port = port
+        self._username = username
+        self._password = password
+        self._timeout_s = timeout_s
+        self._ftp: ftplib.FTP_TLS | None = None
+
+    def connect(self) -> None:
+        entry = f"{self._host}:{self._port}"
+        ftp = _SessionReuseFTP_TLS(context=ssl.create_default_context(), timeout=self._timeout_s)
+        try:
+            ftp.connect(self._host, self._port)
+            ftp.login(self._username, self._password)  # sends AUTH TLS before USER/PASS
+            ftp.prot_p()
+            ftp.voidcmd("TYPE I")  # binary; SIZE is also only reliable in binary mode
+        except ssl.SSLCertVerificationError as exc:
+            ftp.close()
+            raise SftpUploadError(
+                f"FTPS certificate for {entry} was not trusted ({exc.verify_message}); refusing to connect"
+            ) from exc
+        except ftplib.error_perm as exc:
+            ftp.close()
+            if str(exc).startswith("530"):
+                raise SftpUploadError(
+                    f"FTPS login to {entry} was rejected (check sftp.username / sftp.password)"
+                ) from exc
+            raise SftpUploadError(f"FTPS connection to {entry} failed: {exc}") from exc
+        except ftplib.all_errors as exc:
+            ftp.close()
+            raise SftpUploadError(f"FTPS connection to {entry} failed: {exc}") from exc
+        self._ftp = ftp
+
+    def close(self) -> None:
+        if self._ftp is not None:
+            try:
+                self._ftp.quit()
+            except ftplib.all_errors:
+                logger.debug("SFTP_UPLOAD - FTPS quit failed", exc_info=True)
+                self._ftp.close()
+        self._ftp = None
+
+    def alive(self) -> bool:
+        if self._ftp is None or self._ftp.sock is None:
+            return False
+        try:
+            self._ftp.voidcmd("NOOP")
+        except ftplib.all_errors:
+            return False
+        return True
+
+    def size(self, path: str) -> int | None:
+        """Remote file size, or None when it does not exist."""
+        assert self._ftp is not None
+        try:
+            return self._ftp.size(path)
+        except ftplib.error_perm:  # 550: no such file
+            return None
+
+    def put(self, local: Path, path: str) -> None:
+        assert self._ftp is not None
+        with local.open("rb") as fh:
+            self._ftp.storbinary(f"STOR {path}", fh)
+
+    def replace(self, src: str, dst: str) -> None:
+        assert self._ftp is not None
+        try:
+            self._ftp.rename(src, dst)
+        except ftplib.error_perm:
+            # Some servers refuse RNTO onto an existing file.
+            try:
+                self._ftp.delete(dst)
+            except ftplib.error_perm:
+                pass
+            self._ftp.rename(src, dst)
+
+    def remove(self, path: str) -> None:
+        assert self._ftp is not None
+        self._ftp.delete(path)
+
+
+# ---------------------------------------------------------------- session
+
+class SftpSession:
+    """One FTPS or SFTP connection for a run. Use as a context manager.
+
+    ``config["sftp"]["protocol"]`` picks the protocol (``"ftps"`` by
+    default, or ``"sftp"``); the port defaults to 21 or 22 to match.
+
+    ``upload()`` never raises for an individual file: it returns False and
+    logs, so a failed upload never fails the bill that was just saved. After
+    one failed reconnect the session marks itself broken and every later
+    upload returns False straight away; the next run's sweep catches up.
+    """
+
+    def __init__(self, config: dict) -> None:
+        sftp_cfg = config.get("sftp") or {}
+        self.protocol: str = (sftp_cfg.get("protocol") or DEFAULT_PROTOCOL).strip().lower()
+        if self.protocol not in DEFAULT_PORTS:
+            raise SftpUploadError(f"sftp.protocol must be 'ftps' or 'sftp', not {self.protocol!r}")
+        self.host: str = (sftp_cfg.get("host") or "").strip()
+        self.port: int = int(sftp_cfg.get("port") or DEFAULT_PORTS[self.protocol])
+        self._username: str = sftp_cfg.get("username") or ""
+        self._password: str = sftp_cfg.get("password") or ""
+        self.remote_dir: str = (sftp_cfg.get("remote_dir") or "").strip()
+        timeout_s = float(sftp_cfg.get("timeout_s") or DEFAULT_TIMEOUT_S)
+        if self.protocol == PROTOCOL_FTPS:
+            self._conn = _FtpsConnection(self.host, self.port, self._username, self._password, timeout_s)
+        else:
+            self._conn = _SftpConnection(self.host, self.port, self._username, self._password, timeout_s, sftp_cfg)
+        self.broken = False
+
+    # ---------------------------------------------------------- connection
+
+    def _check_config(self) -> None:
+        missing = [k for k, v in (("host", self.host), ("username", self._username), ("password", self._password)) if not v]
+        if missing:
+            raise SftpUploadError(f"config sftp.{', sftp.'.join(missing)} not set")
+
+    def connect(self) -> None:
+        """Open the connection. Raises SftpUploadError on any failure."""
+        self._check_config()
+        self._conn.connect()
+        logger.info(
+            "SFTP_UPLOAD - connected to %s:%d over %s (remote dir %r)",
+            self.host, self.port, self.protocol.upper(), self.remote_dir or "(login folder)",
+        )
+
+    def close(self) -> None:
+        self._conn.close()
+
     def __enter__(self) -> SftpSession:
         self.connect()
         return self
@@ -230,8 +415,7 @@ class SftpSession:
         self.close()
 
     def _alive(self) -> bool:
-        transport = self._client.get_transport() if self._client else None
-        return bool(transport and transport.is_active() and self._sftp is not None)
+        return self._conn.alive()
 
     # -------------------------------------------------------------- upload
 
@@ -240,30 +424,18 @@ class SftpSession:
 
     def _upload_once(self, local: Path, remote_name: str) -> str:
         """Upload one file atomically. Returns the remote path. Raises on failure."""
-        assert self._sftp is not None
         final = self._remote(remote_name)
         size = local.stat().st_size
-        try:
-            if self._sftp.stat(final).st_size == size:
-                logger.info("SFTP_UPLOAD - %s already on the server with the same size", final)
-                return final
-        except FileNotFoundError:
-            pass
+        if self._conn.size(final) == size:
+            logger.info("SFTP_UPLOAD - %s already on the server with the same size", final)
+            return final
         part = final + PART_SUFFIX
-        self._sftp.put(str(local), part, confirm=False)
-        remote_size = self._sftp.stat(part).st_size
+        self._conn.put(local, part)
+        remote_size = self._conn.size(part)
         if remote_size != size:
-            self._sftp.remove(part)
+            self._conn.remove(part)
             raise OSError(f"size mismatch after upload ({remote_size} remote vs {size} local)")
-        try:
-            self._sftp.posix_rename(part, final)
-        except OSError:
-            # Server without the posix-rename extension: plain rename fails if the target exists.
-            try:
-                self._sftp.remove(final)
-            except FileNotFoundError:
-                pass
-            self._sftp.rename(part, final)
+        self._conn.replace(part, final)
         return final
 
     def upload(self, local_path: str | Path, remote_name: str | None = None) -> bool:
@@ -289,7 +461,7 @@ class SftpSession:
                     return False
             try:
                 remote = self._upload_once(local, name)
-            except (paramiko.SSHException, EOFError, OSError) as exc:
+            except _TRANSFER_ERRORS as exc:
                 # A dropped connection gets one reconnect; a server-side error
                 # (permission, disk full) on a live connection does not.
                 if attempt == 1 and not self._alive():
@@ -298,13 +470,17 @@ class SftpSession:
                 logger.error("SFTP_UPLOAD - %s upload failed: %s", name, exc)
                 return False
             self._write_sidecar(local, remote)
-            logger.info("SFTP_UPLOAD - uploaded %s (%d bytes) to %s:%s", local.name, local.stat().st_size, self.host, remote)
+            logger.info(
+                "SFTP_UPLOAD - uploaded %s (%d bytes) over %s to %s:%s",
+                local.name, local.stat().st_size, self.protocol.upper(), self.host, remote,
+            )
             return True
         return False
 
     def _write_sidecar(self, local: Path, remote: str) -> None:
         record = {
             "uploaded_at_utc": datetime.now(UTC).isoformat(timespec="seconds"),
+            "protocol": self.protocol,
             "host": self.host,
             "remote_path": remote,
             "size": local.stat().st_size,
