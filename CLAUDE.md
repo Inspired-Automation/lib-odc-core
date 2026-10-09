@@ -351,6 +351,9 @@ entry point of its own.
   entry.
 
 ## Change Log
+- 2026-10-09: v0.13.1 - PATCH. Dependency bumped to `file-allocation-core`
+  0.1.2: customer folders are renamed to the exact Sugar account name before
+  filing. No API change.
 - 2026-10-09: v0.13.0 - MINOR. `sftp_upload` now uploads over explicit
   FTPS by default (`config["sftp"]["protocol"]`, `ftps` or `sftp`), because
   FTPS is the protocol that works on both the client's dev/staging and live
