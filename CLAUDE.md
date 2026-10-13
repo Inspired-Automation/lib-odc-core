@@ -351,6 +351,15 @@ entry point of its own.
   entry.
 
 ## Change Log
+- 2026-10-13: v0.13.2 - PATCH. New `config["sftp"]["atomic_rename"]`
+  (default `true`, unchanged behaviour). `false` puts the file straight to
+  its final name instead of `.part` then rename, on both FTPS and SFTP;
+  the size check and same-size short-circuit still apply. Reason: the
+  Horizon receiver on systems-link (`AWS_SFTP_1.2`, most likely AWS
+  Transfer Family) processes a file when its upload finishes and ignores
+  the rename, so it picks up `<name>.part`. Not yet confirmed with
+  systems-link. The `sftp.staging_dir` alternative was not built: it only
+  helps if their processing is limited to the destination folder.
 - 2026-10-09: v0.13.1 - PATCH. Dependency bumped to `file-allocation-core`
   0.1.2: customer folders are renamed to the exact Sugar account name before
   filing. No API change.
@@ -901,6 +910,13 @@ entry point of its own.
   does not exist and made the documented `pip install` URLs 404).
 
 ## Outstanding TODOs
+- Release v0.13.2 (done 2026-10-13), then pin it in automation-odc-sse-airtricity and
+  automation-odc-electric-ireland and set `sftp.atomic_rename: false` in
+  their `config.template.yaml` (and each machine's local `config.yaml`),
+  unless systems-link would rather keep `.part` and change their trigger.
+  Also check systems-link for duplicate `.part` files left by earlier runs:
+  if their process moved a `.part` before our size check or rename, that
+  upload logged as failed, got no sidecar, and was re-sent by the next sweep.
 - Requeue the 80 `ODC_job_details_pdfauto` rows left `Upload Failed` by the
   `prod`/`LIVE` folder mismatch (ids 3180, 3950-4028). Their files were copied
   to the queued `LIVE\PDFAuto` paths on 2026-10-05. The rows need the

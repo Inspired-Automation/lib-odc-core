@@ -5,6 +5,19 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.13.2] - 2026-10-13
+### Added
+- `config["sftp"]["atomic_rename"]` (default `true`, so behaviour is
+  unchanged). `false` uploads straight to the final name instead of
+  `<name>.part` then rename, for both FTPS and SFTP. The size check and the
+  "already on the server with the same size" short-circuit still apply; a
+  size mismatch removes the remote file and fails the upload as before.
+  Added because the Horizon receiver on systems-link
+  (`ftp.daisystg.systems-link.com`, which reports itself as
+  `AWS_SFTP_1.2`) picks files up as `<name>.part`: AWS Transfer Family runs
+  its post-upload processing when the upload finishes and a rename does
+  not trigger it. Not yet confirmed with systems-link.
+
 ## [0.13.1] - 2026-10-09
 ### Changed
 - Depends on `file-allocation-core` 0.1.2: an Inspired PLC/Ignite customer

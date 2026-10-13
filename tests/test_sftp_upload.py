@@ -162,6 +162,49 @@ def test_upload_size_mismatch_removes_part_and_fails(tmp_path):
     assert not sftp_upload.is_uploaded(local)
 
 
+@pytest.mark.parametrize("value", [False, "false", " No ", 0, "0", "off"])
+def test_upload_without_atomic_rename_puts_straight_to_final_name(tmp_path, value):
+    local = _pdf(tmp_path)
+    session, conn = _session_with_fake_server(tmp_path, remote_dir="in", atomic_rename=value)
+
+    assert session.atomic_rename is False
+    assert session.upload(local) is True
+    conn.put.assert_called_once_with(local, f"in/{local.name}")
+    conn.replace.assert_not_called()
+    assert conn.remote == {f"in/{local.name}": 2048}
+    assert sftp_upload.is_uploaded(local)
+
+
+@pytest.mark.parametrize("value", [None, "", True, "true", "yes"])
+def test_atomic_rename_defaults_on(tmp_path, value):
+    assert SftpSession(_config(tmp_path, atomic_rename=value)).atomic_rename is True
+
+
+def test_atomic_rename_rejects_unknown_value(tmp_path):
+    with pytest.raises(SftpUploadError, match="atomic_rename"):
+        SftpSession(_config(tmp_path, atomic_rename="maybe"))
+
+
+def test_upload_without_atomic_rename_size_mismatch_removes_file_and_fails(tmp_path):
+    local = _pdf(tmp_path)
+    session, conn = _session_with_fake_server(tmp_path, atomic_rename=False)
+    conn.put.side_effect = lambda local_path, path: conn.remote.__setitem__(path, 1)
+
+    assert session.upload(local) is False
+    assert conn.remote == {}
+    conn.replace.assert_not_called()
+    assert not sftp_upload.is_uploaded(local)
+
+
+def test_upload_without_atomic_rename_existing_same_size_is_done_without_put(tmp_path):
+    local = _pdf(tmp_path)
+    session, conn = _session_with_fake_server(tmp_path, remote_files={local.name: 2048}, atomic_rename=False)
+
+    assert session.upload(local) is True
+    conn.put.assert_not_called()
+    assert sftp_upload.is_uploaded(local)
+
+
 def test_upload_skips_file_with_sidecar(tmp_path):
     local = _pdf(tmp_path)
     sftp_upload.sidecar_path(local).write_text("{}", encoding="utf-8")

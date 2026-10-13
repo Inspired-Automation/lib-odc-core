@@ -84,6 +84,7 @@ sftp:                       # 0.10.0, sftp_upload callers only
   username:                 # config.yaml / Runtime config only
   password:                 # config.yaml / Runtime config only
   remote_dir: ""
+  atomic_rename: true       # 0.13.2: false = no .part + rename
   host_key:                 # sftp only; optional; blank = trust on first use
   known_hosts_file: config/sftp_known_hosts   # sftp only
   clients: []
@@ -541,6 +542,13 @@ with SftpSession(config) as session:      # raises SftpUploadError if it cannot 
   dropped connection; if that fails the session is `broken` and every later
   upload returns False. A server-side error on a live connection fails
   that file only.
+- `atomic_rename` (0.13.2, default true): false puts the file straight to
+  its final name and skips the rename; the size check still runs and a
+  mismatch removes the remote file. For receivers that process a file as
+  soon as its upload finishes and ignore renames (AWS Transfer Family),
+  which otherwise pick up `<name>.part`. Accepts a YAML bool or
+  `true/false/yes/no/1/0/on/off` text; anything else raises
+  `SftpUploadError` when the session is built.
 - SFTP host keys: a configured `host_key` is the only key accepted
   (`RejectPolicy`). Otherwise trust-on-first-use: the first key is saved to
   `known_hosts_file` and its SHA256 fingerprint logged at WARNING; any other

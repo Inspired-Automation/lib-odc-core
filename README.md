@@ -184,6 +184,7 @@ sftp:
   username:
   password:
   remote_dir: ""          # blank = the login folder
+  atomic_rename: true     # false = put straight to the final name (no .part + rename)
   host_key:               # sftp only: optional "<type> <base64>"; blank = trust on first use
   known_hosts_file: config/sftp_known_hosts   # sftp only
   clients: []             # client_name values whose files are uploaded

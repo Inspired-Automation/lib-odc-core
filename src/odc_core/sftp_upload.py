@@ -18,6 +18,13 @@ Every upload is atomic and recorded locally, whichever protocol is used:
 3. rename to the final name,
 4. write a ``<file>.uploaded`` sidecar next to the local file.
 
+``config["sftp"]["atomic_rename"]: false`` (0.13.2) skips the ``.part``
+step: the file is put straight to its final name, then size-checked (and
+removed on a mismatch). That is for a receiver that processes a file as
+soon as its upload finishes and ignores renames, as AWS Transfer Family
+does - such a receiver picks up ``<name>.part`` before the rename. The
+cost is that a receiver can see a partly written file under the final name.
+
 A remote file that already exists with the same size counts as uploaded.
 Anything not yet marked is picked up by ``pending_files()`` on a later run
 (the "sweep"), because a bill the duplicate check skips is never downloaded
@@ -94,6 +101,20 @@ class SftpUploadError(RuntimeError):
 
 def _normalise(value: str | None) -> str:
     return " ".join((value or "").split()).lower()
+
+
+def _config_flag(value: object, default: bool, name: str) -> bool:
+    """A yes/no config value: a YAML bool, or text from the Runtime config panel."""
+    if value is None or value == "":
+        return default
+    if isinstance(value, bool):
+        return value
+    text = str(value).strip().lower()
+    if text in ("true", "yes", "1", "on"):
+        return True
+    if text in ("false", "no", "0", "off"):
+        return False
+    raise SftpUploadError(f"sftp.{name} must be true or false, not {value!r}")
 
 
 def is_enabled_for(client_name: str | None, config: dict) -> bool:
@@ -381,6 +402,7 @@ class SftpSession:
         self._username: str = sftp_cfg.get("username") or ""
         self._password: str = sftp_cfg.get("password") or ""
         self.remote_dir: str = (sftp_cfg.get("remote_dir") or "").strip()
+        self.atomic_rename: bool = _config_flag(sftp_cfg.get("atomic_rename"), True, "atomic_rename")
         timeout_s = float(sftp_cfg.get("timeout_s") or DEFAULT_TIMEOUT_S)
         if self.protocol == PROTOCOL_FTPS:
             self._conn = _FtpsConnection(self.host, self.port, self._username, self._password, timeout_s)
@@ -400,8 +422,9 @@ class SftpSession:
         self._check_config()
         self._conn.connect()
         logger.info(
-            "SFTP_UPLOAD - connected to %s:%d over %s (remote dir %r)",
+            "SFTP_UPLOAD - connected to %s:%d over %s (remote dir %r, %s)",
             self.host, self.port, self.protocol.upper(), self.remote_dir or "(login folder)",
+            "upload to .part then rename" if self.atomic_rename else "upload straight to the final name",
         )
 
     def close(self) -> None:
@@ -423,19 +446,20 @@ class SftpSession:
         return posixpath.join(self.remote_dir, name) if self.remote_dir else name
 
     def _upload_once(self, local: Path, remote_name: str) -> str:
-        """Upload one file atomically. Returns the remote path. Raises on failure."""
+        """Upload one file (via .part unless atomic_rename is off). Returns the remote path. Raises on failure."""
         final = self._remote(remote_name)
         size = local.stat().st_size
         if self._conn.size(final) == size:
             logger.info("SFTP_UPLOAD - %s already on the server with the same size", final)
             return final
-        part = final + PART_SUFFIX
-        self._conn.put(local, part)
-        remote_size = self._conn.size(part)
+        target = final + PART_SUFFIX if self.atomic_rename else final
+        self._conn.put(local, target)
+        remote_size = self._conn.size(target)
         if remote_size != size:
-            self._conn.remove(part)
+            self._conn.remove(target)
             raise OSError(f"size mismatch after upload ({remote_size} remote vs {size} local)")
-        self._conn.replace(part, final)
+        if target != final:
+            self._conn.replace(target, final)
         return final
 
     def upload(self, local_path: str | Path, remote_name: str | None = None) -> bool:
