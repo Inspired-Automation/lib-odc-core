@@ -5,6 +5,20 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.13.3] - 2026-10-15
+### Changed
+- `human_in_loop` on `jobstodo.get_job_details()` rows and on
+  `grab_all.get_job()` now comes from the job first:
+  `COALESCE(ODC_jobs.human_in_loop, ODC_suppliers.human_in_loop)`.
+  `spODC_CreateJobsAndDetails` copies `ODC_services.human_in_loop` onto
+  each new job, so the flag can now be set per service; a job with NULL
+  still falls back to the supplier's flag as before. The column name is
+  unchanged, so callers need no code change.
+- **Requires `ODC_jobs.human_in_loop`** (`TINYINT NULL`, migration
+  `sql/11` in `automation-odc-accounts-and-jobs-refresh`). Present on both
+  `Titan_INSE_DEV` and `Titan_INSE` (checked 2026-10-15). Against a
+  database without it, both queries fail with "Invalid column name".
+
 ## [0.13.2] - 2026-10-13
 ### Added
 - `config["sftp"]["atomic_rename"]` (default `true`, so behaviour is

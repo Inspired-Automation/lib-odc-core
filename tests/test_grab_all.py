@@ -55,7 +55,7 @@ def test_get_job_maps_columns(mock_connect):
     sql = cursor.execute.call_args.args[0]
     assert "FROM ODC_jobs AS j" in sql
     assert "LEFT JOIN ODC_suppliers AS s" in sql
-    assert "s.[human_in_loop]" in sql
+    assert "COALESCE(j.[human_in_loop], s.[human_in_loop]) AS [human_in_loop]" in sql
 
 
 @patch("odc_core.db.pyodbc.connect")

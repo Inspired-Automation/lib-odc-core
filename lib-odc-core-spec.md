@@ -256,7 +256,8 @@ neither references anything portal-specific.
 
 Added 0.8.1, generalised out of `automation-odc-energia`'s Phase 3 (see
 `docs/energia-human-assisted-login-control-room-contract.md` in that repo).
-For any supplier flagged by `ODC_suppliers.human_in_loop` (surfaced as the
+For any job flagged by `ODC_jobs.human_in_loop`, falling back to
+`ODC_suppliers.human_in_loop` when that is NULL (0.13.3; surfaced as the
 `human_in_loop` column on every row `jobstodo.get_job_details()` returns -
 §3.2), `request_assist()`/`wait_for_human_login()` are the two calls a
 supplier project needs instead of hand-rolling the file protocol and the

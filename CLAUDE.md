@@ -68,6 +68,16 @@ entry point of its own.
   left-joins this table on `ODC_jobs.supplier_id` and returns
   `human_in_loop` on every row - see spec §4.3 and the new `human_in_loop`
   module below.
+- `ODC_jobs.human_in_loop` (`TINYINT NULL`, migration `sql/11` in
+  `automation-odc-accounts-and-jobs-refresh`) is the **per-job** flag,
+  copied from `ODC_services.human_in_loop` by `spODC_CreateJobsAndDetails`.
+  Since 0.13.3 `jobstodo.get_job_details()` and `grab_all.get_job()` return
+  `COALESCE(j.human_in_loop, s.human_in_loop) AS human_in_loop`: the job's
+  flag wins, the supplier's is the fallback. On both `Titan_INSE_DEV` and
+  live `Titan_INSE` (confirmed via `INFORMATION_SCHEMA.COLUMNS` 2026-10-15,
+  along with `ODC_services.human_in_loop`/`grab_all` and the updated proc on
+  both). On live no `ODC_services` row has it set yet, so every live job is
+  NULL and falls back to `ODC_suppliers`.
 - **Grab-all (released in 0.9.0; schema on DEV and live)**: `ODC_jobs.grab_all`
   (`TINYINT NOT NULL DEFAULT 0`; `BIT` on DEV until migration 004 on
   2026-10-01) and `ODC_jobs.grab_all_start_date` (`DATE NULL`), plus the
@@ -188,6 +198,12 @@ entry point of its own.
   real DEV table was created, and `file_save_as` is unchanged.
 
 ## Known Gotchas
+- **0.13.3 needs `ODC_jobs.human_in_loop` on the target database.** Both
+  `get_job_details()` and `grab_all.get_job()` select it, so a bot pinned
+  to 0.13.3 against a database without migration `sql/11` fails every job
+  with "Invalid column name 'human_in_loop'". Both `Titan_INSE_DEV` and live
+  `Titan_INSE` have it (confirmed 2026-10-15), so this only bites a new or
+  restored database that has not had `sql/11`.
 - `pdf_auto_copy`'s target folder must match the path that
   `spODC_job_details_UpdateStatus` queues into `ODC_job_details_pdfauto.filepath`:
   `{base}\LIVE\PDFAuto\{client}` on `Titan_INSE` and `{base}\DEV\PDFAuto\{client}`
@@ -351,6 +367,15 @@ entry point of its own.
   entry.
 
 ## Change Log
+- 2026-10-15: v0.13.3 - PATCH. `human_in_loop` now comes from the job
+  first: `get_job_details()` and `grab_all.get_job()` select
+  `COALESCE(j.[human_in_loop], s.[human_in_loop]) AS [human_in_loop]`, so the
+  per-service flag that `spODC_CreateJobsAndDetails` copies onto
+  `ODC_jobs` takes effect, falling back to `ODC_suppliers` when the job's is
+  NULL. Same column name, no caller change. Both SELECTs were run read-only
+  against `Titan_INSE_DEV` the same day. Needs migration `sql/11` on the
+  target DB, confirmed applied to both DEV and live `Titan_INSE` the same
+  day. Not released.
 - 2026-10-13: v0.13.2 - PATCH. New `config["sftp"]["atomic_rename"]`
   (default `true`, unchanged behaviour). `false` puts the file straight to
   its final name instead of `.part` then rename, on both FTPS and SFTP;
@@ -910,6 +935,9 @@ entry point of its own.
   does not exist and made the documented `pip install` URLs 404).
 
 ## Outstanding TODOs
+- Release v0.13.3 (done 2026-10-15). `sql/11` is already on both DEV and
+  live `Titan_INSE` (confirmed 2026-10-15), so live bots can pin it once
+  released.
 - Release v0.13.2 (done 2026-10-13), then pin it in automation-odc-sse-airtricity and
   automation-odc-electric-ireland and set `sftp.atomic_rename: false` in
   their `config.template.yaml` (and each machine's local `config.yaml`),

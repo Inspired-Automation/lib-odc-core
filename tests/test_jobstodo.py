@@ -87,7 +87,11 @@ def test_get_job_details_single_credential_pending_only(mock_connect):
     assert any("ODC_scrape_accounts" in sql for sql in executed_sql)
     assert any("sug_internal_id" in sql for sql in executed_sql)
     assert any("ODC_suppliers" in sql for sql in executed_sql)
-    assert any("human_in_loop" in sql for sql in executed_sql)
+    # The job's own flag wins; the supplier's is the fallback.
+    assert any(
+        "COALESCE(j.[human_in_loop], s.[human_in_loop]) AS [human_in_loop]" in sql
+        for sql in executed_sql
+    )
     assert any("LEFT JOIN" in sql for sql in executed_sql)
 
 

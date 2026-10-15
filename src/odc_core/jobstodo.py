@@ -54,7 +54,7 @@ SELECT
     d.[alternative_ref_1],
     d.[status],
     a.[sug_internal_id],
-    s.[human_in_loop]
+    COALESCE(j.[human_in_loop], s.[human_in_loop]) AS [human_in_loop]
 FROM {jobs} AS j
 JOIN {job_details} AS d ON j.id = d.job_id
 JOIN {scrape_accounts} AS a ON d.[scrape_accounts_id] = a.[id]
@@ -101,8 +101,8 @@ _CLEAR_PROCESS_ID = "UPDATE {jobs} SET process_id = NULL WHERE id = ?"
 #: them via DDL is an Outstanding TODO in CLAUDE.md, same pattern as the
 #: 0.8.8 rdp_username/rdp_password removal.
 #:
-#: ODC_suppliers.human_in_loop (surfaced on every get_job_details() row via
-#: the LEFT JOIN below) is unrelated to this removed signal - it is still
+#: human_in_loop (surfaced on every get_job_details() row: ODC_jobs.human_in_loop,
+#: falling back to ODC_suppliers.human_in_loop via the LEFT JOIN below) is unrelated to this removed signal - it is still
 #: the flag a caller checks to decide whether to call
 #: human_in_loop.request_assist()/wait_for_human_login() at all.
 
@@ -164,12 +164,14 @@ def get_job_details(
     `file_allocation` to resolve the Inspired PLC company folder name). A
     job_details row with no matching scrape_accounts row is excluded.
 
-    Each row is also left-joined to `suppliers` on `ODC_jobs.supplier_id`, so
-    it carries `human_in_loop` (nullable tinyint - truthy means this
-    supplier's login requires `human_in_loop.wait_for_human_login()`, see
-    that module). A left join, unlike the scrape_accounts one above: a job
-    row with no matching supplier row still comes back, just with
-    `human_in_loop` as None rather than being silently excluded.
+    Each row also carries `human_in_loop` (nullable tinyint - truthy means
+    this job's login requires `human_in_loop.wait_for_human_login()`, see
+    that module): `ODC_jobs.human_in_loop` (copied from
+    `ODC_services.human_in_loop` by spODC_CreateJobsAndDetails), falling
+    back to `suppliers.human_in_loop` when the job's is NULL. `suppliers` is
+    left-joined on `ODC_jobs.supplier_id`, unlike the scrape_accounts join
+    above: a job row with no matching supplier row still comes back, with
+    `human_in_loop` as None if the job's own is NULL too.
     """
     update_sql = _UPDATE_PROCESS_ID.format(jobs=tables["jobs"])
     cred_sql = _SELECT_JOB_CREDENTIALS.format(jobs=tables["jobs"])

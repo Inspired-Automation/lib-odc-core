@@ -20,10 +20,11 @@ That breaks three assumptions the account-search helpers make:
   includes ``job_details_id``. ``ODC_grab_all_data`` has no such column (a
   grab-all file has no job_details row), so ``save()`` here inserts the
   grab-all table's own column set.
-- ``jobstodo.get_job_details()`` also surfaces ``ODC_suppliers.human_in_loop``
-  via its own join, which a grab-all job otherwise has no row to read from.
-  ``get_job()`` LEFT JOINs ``{suppliers}`` itself so every grab-all consumer
-  can decide whether to request human-assisted login the same way.
+- ``jobstodo.get_job_details()`` also surfaces ``human_in_loop`` (the job's
+  own ``ODC_jobs.human_in_loop``, falling back to
+  ``ODC_suppliers.human_in_loop``), which a grab-all job otherwise has no
+  row to read from. ``get_job()`` reads it the same way so every grab-all
+  consumer can decide whether to request human-assisted login.
 """
 
 from __future__ import annotations
@@ -59,7 +60,7 @@ SELECT
     j.[pdf_auto_endpoint],
     j.[pdf_auto_key],
     j.[pdf_auto_instance],
-    s.[human_in_loop]
+    COALESCE(j.[human_in_loop], s.[human_in_loop]) AS [human_in_loop]
 FROM {jobs} AS j
 LEFT JOIN {suppliers} AS s ON j.[supplier_id] = s.[id]
 WHERE j.[id] = ?
@@ -113,9 +114,10 @@ def get_job(job_id: str, tables: dict, dsn: str) -> dict | None:
     Keys match the job-level keys on ``jobstodo.get_job_details()`` rows
     (plus ``id``, ``grab_all`` and ``grab_all_start_date``), so a caller can
     read the job header the same way in either mode - including
-    ``human_in_loop``, ``LEFT JOIN``ed from ``{suppliers}`` by
-    ``supplier_id`` the same way ``jobstodo._SELECT_JOB_DETAILS`` already
-    does, so a grab-all job (which has no ``ODC_job_details`` row to read
+    ``human_in_loop``: ``ODC_jobs.human_in_loop`` (copied from
+    ``ODC_services.human_in_loop`` at job creation), falling back to
+    ``{suppliers}.human_in_loop`` ``LEFT JOIN``ed by ``supplier_id`` when the
+    job's is NULL, the same way ``jobstodo._SELECT_JOB_DETAILS`` does, so a grab-all job (which has no ``ODC_job_details`` row to read
     that flag from) can still decide whether to request human-assisted
     login. Does not claim the job: call ``claim_job()`` for that.
     """
