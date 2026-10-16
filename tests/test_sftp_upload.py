@@ -482,6 +482,84 @@ def test_accept_any_host_key_rejects_bad_value(tmp_path):
         SftpSession(_config(tmp_path, protocol="sftp", accept_any_host_key="maybe"))
 
 
+# ---------------------------------------------------------------- staging (0.13.6)
+
+def test_staging_dir_layout_per_env_client_and_supplier(tmp_path):
+    cfg = {"env": "prod", "pdf_auto": {"base_path": str(tmp_path)}}
+    assert sftp_upload.staging_dir("Horizon", "SSE Airtricity", cfg) == tmp_path / "LIVE" / "SFTP" / "Horizon" / "SSE Airtricity"
+    cfg["env"] = "dev"
+    assert sftp_upload.staging_dir("Horizon", "Energia", cfg) == tmp_path / "DEV" / "SFTP" / "Horizon" / "Energia"
+
+
+def test_staging_dir_defaults_to_unc_base():
+    path = sftp_upload.staging_dir("Horizon", "Energia", {"env": "live"})
+    assert str(path).startswith("\\\\inspiredenergysolutions.local\\")
+    assert path.parts[-4:] == ("LIVE", "SFTP", "Horizon", "Energia")
+
+
+def test_staging_dir_rejects_unknown_env_and_blank_names(tmp_path):
+    with pytest.raises(ValueError):
+        sftp_upload.staging_dir("Horizon", "Energia", {"env": "uat"})
+    with pytest.raises(ValueError):
+        sftp_upload.staging_dir("Horizon", " ", {"env": "dev"})
+
+
+def test_stage_copies_and_leaves_no_part(tmp_path):
+    src = _pdf(tmp_path)
+    staging = tmp_path / "stage"
+    dest = sftp_upload.stage(src, staging)
+    assert dest == staging / src.name
+    assert dest.read_bytes() == src.read_bytes()
+    assert src.exists()
+    assert not list(staging.glob("*.part"))
+
+
+def test_stage_size_mismatch_raises_and_cleans_up(tmp_path):
+    src = _pdf(tmp_path)
+    staging = tmp_path / "stage"
+
+    def short_copy(a, b):
+        Path(b).write_bytes(b"x")
+
+    with patch.object(sftp_upload.shutil, "copy2", side_effect=short_copy):
+        with pytest.raises(sftp_upload.SftpStagingError):
+            sftp_upload.stage(src, staging)
+    assert list(staging.iterdir()) == []
+
+
+def test_staged_files_skips_part_and_missing_folder(tmp_path):
+    staging = tmp_path / "stage"
+    assert sftp_upload.staged_files(staging) == []
+    staging.mkdir()
+    (staging / "a.pdf").write_bytes(b"a")
+    (staging / "b.pdf.part").write_bytes(b"b")
+    assert [p.name for p in sftp_upload.staged_files(staging)] == ["a.pdf"]
+
+
+def test_upload_staged_deletes_copy_and_writes_no_sidecar(tmp_path):
+    session, conn = _session_with_fake_server(tmp_path, atomic_rename=False)
+    staged = sftp_upload.stage(_pdf(tmp_path), tmp_path / "stage")
+    assert session.upload_staged(staged) is True
+    assert conn.remote[staged.name] == 2048
+    assert not staged.exists()
+    assert not sftp_upload.sidecar_path(staged).exists()
+
+
+def test_upload_staged_keeps_copy_on_failure(tmp_path):
+    session, conn = _session_with_fake_server(tmp_path)
+    staged = sftp_upload.stage(_pdf(tmp_path), tmp_path / "stage")
+    conn.put.side_effect = OSError("disk full")
+    assert session.upload_staged(staged) is False
+    assert staged.exists()
+
+
+def test_upload_staged_already_removed_by_another_run_is_ok(tmp_path):
+    session, conn = _session_with_fake_server(tmp_path)
+    staged = sftp_upload.stage(_pdf(tmp_path), tmp_path / "stage")
+    with patch.object(Path, "unlink", side_effect=FileNotFoundError):
+        assert session.upload_staged(staged) is True
+
+
 def test_host_entry_non_default_port():
     assert sftp_upload._host_entry("h", 22) == "h"
     assert sftp_upload._host_entry("h", 2222) == "[h]:2222"

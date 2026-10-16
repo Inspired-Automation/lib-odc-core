@@ -368,6 +368,17 @@ entry point of its own.
   entry.
 
 ## Change Log
+- 2026-10-16: v0.13.6 - PATCH. SFTP staging, the same pattern as
+  `pdf_auto_copy`. New `sftp_upload.staging_dir()` (`{base}\{LIVE|DEV}\SFTP\{client}\{supplier}`,
+  where `base` is `pdf_auto.base_path` or the I: drive's UNC path), `stage()`
+  (copied via `.part`, size-checked), `staged_files()`, and
+  `SftpSession.upload_staged()`, which uploads and deletes the copy. Also
+  `upload(..., sidecar=True)`. Bots now upload a staged copy rather than the
+  file in the client folder, and sweep the staging folder rather than querying
+  the database. A runner whose `X:` is different storage could not see other
+  runners' bills: SSE Airtricity's sweep reported "0 of 20" on 2026-10-16
+  with 12 bills not uploaded. One folder per supplier, so concurrent bots for
+  the same client never clash. `pending_files()` and sidecars are kept.
 - 2026-10-16: v0.13.5 - PATCH. New `config["sftp"]["accept_any_host_key"]`
   (default false): true accepts any SFTP host key without pinning, logging
   the fingerprint at WARNING each connection. For bot runners whose network

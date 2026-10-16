@@ -5,6 +5,18 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.13.6] - 2026-10-16
+### Added
+- SFTP staging in `sftp_upload`, the same pattern as `pdf_auto_copy`:
+  - `staging_dir(client_name, supplier, config)` gives `{base}\{LIVE|DEV}\SFTP\{client_name}\{supplier}`. `base` is `pdf_auto.base_path`, or else the I: drive's UNC path.
+  - `stage(local_path, staging)` copies via `.part` and checks the size. It raises the new `SftpStagingError`.
+  - `staged_files(staging)` lists the queue, skipping `.part` files, oldest first.
+  - `SftpSession.upload_staged(path)` uploads with no sidecar and deletes the copy once it is on the server.
+  - `SftpSession.upload(..., sidecar=True)` gains a keyword to skip the sidecar.
+- Why: bots uploaded from the client folder (`X:\ODC_Clients\...`) and swept by querying the database. A runner whose `X:` is different storage could not see bills another runner saved, so they were silently skipped. SSE Airtricity hit this on 2026-10-16: "0 of 20 ... still to upload". The staging folder is a UNC path, the same from every runner.
+- One folder per supplier, so bots for the same client never sweep each other's files when they run at the same time.
+- `pending_files()` and sidecars are unchanged, for callers that have not moved yet.
+
 ## [0.13.5] - 2026-10-16
 ### Added
 - `config["sftp"]["accept_any_host_key"]` (default `false`, so behaviour is

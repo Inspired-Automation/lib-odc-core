@@ -528,9 +528,24 @@ is_enabled_for(client_name: str | None, config: dict) -> bool
 is_uploaded(local_path) -> bool
 pending_files(supplier: str, client_name: str, since: date, tables: dict, dsn: str) -> list[str]
 
+# 0.13.6 staging
+staging_dir(client_name: str, supplier: str, config: dict) -> Path
+stage(local_path, staging) -> Path       # raises SftpStagingError / OSError
+staged_files(staging) -> list[Path]      # raises OSError if unlistable
+
 with SftpSession(config) as session:      # raises SftpUploadError if it cannot connect
-    session.upload(local_path, remote_name=None) -> bool   # never raises
+    session.upload(local_path, remote_name=None, *, sidecar=True) -> bool   # never raises
+    session.upload_staged(staged_path) -> bool                             # never raises
 ```
+
+- Staging (0.13.6), the recommended flow, the same pattern as `pdf_auto_copy`:
+  - `staging_dir()` is `{base}\{LIVE|DEV}\SFTP\{client_name}\{supplier}`. `base` is `pdf_auto.base_path`, or else the I: drive's UNC path. LIVE/DEV comes from `config["env"]`, as in `pdf_auto_copy`.
+  - There is one folder per supplier, so bots for the same client running at the same time never sweep each other's files.
+  - `stage()` copies the saved bill to `<name>.part`, checks the size, and renames it.
+  - `upload_staged()` uploads without a sidecar and deletes the copy on success, returning True even if the delete fails. On a failure the copy stays.
+  - `staged_files()` (skips `.part`, oldest first) is the sweep's queue.
+  - Nothing reads the client folder, so a bill saved on one runner is uploaded by whichever runner sweeps next.
+  - `pending_files()` and the sidecars are the pre-0.13.6 flow, kept for callers that have not moved.
 
 - Enabled per client by `config["sftp"]["clients"]` (case/space-insensitive
   match on `ODC_jobs.client_name`). No database column.

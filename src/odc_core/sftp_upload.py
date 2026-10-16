@@ -49,6 +49,18 @@ means the bot can no longer tell the real server from anything in between.
 
 Credentials come only from the caller's ``config["sftp"]`` (``config.yaml`` /
 the Control Room Runtime config panel) and are never logged.
+
+Staging (0.13.6), the same idea as ``pdf_auto_copy``: the bot copies each
+saved bill to ``staging_dir()``, which is
+``{base}\\{LIVE|DEV}\\SFTP\\{client_name}\\{supplier}`` on the I: drive's
+UNC path. It then uploads that copy with ``SftpSession.upload_staged()``,
+which deletes the copy once it is on the server. Anything left in the folder
+is the queue: ``staged_files()`` lists it for the next run's sweep. Neither
+step reads the client folder, so it no longer matters which runner a bill
+was saved on, or what that runner maps ``X:`` to. There is one folder per
+supplier, so bots for the same client that run at the same time never sweep
+each other's files. ``pending_files()`` and the ``.uploaded`` sidecars are
+the pre-0.13.6 method, and are kept for callers that have not moved yet.
 """
 
 from __future__ import annotations
@@ -59,6 +71,7 @@ import hashlib
 import json
 import logging
 import posixpath
+import shutil
 import ssl
 from datetime import UTC, date, datetime
 from pathlib import Path
@@ -78,6 +91,12 @@ DEFAULT_KNOWN_HOSTS_FILE = "config/sftp_known_hosts"
 SIDECAR_SUFFIX = ".uploaded"
 PART_SUFFIX = ".part"
 _MIN_FILE_SIZE = 1024  # bytes; smaller files are VOID in file_save_as / grab_all
+
+# Same base and env folders as pdf_auto_copy: the UNC form of I:\BPI\...,
+# because run nodes' service accounts do not necessarily map I:.
+_DEFAULT_STAGING_BASE = r"\\inspiredenergysolutions.local\DFS\Public\!IES\BPI\Automation Team\Automated Processes\ODC"
+_ENV_FOLDERS = {"prod": "LIVE", "live": "LIVE", "dev": "DEV"}
+STAGING_FOLDER = "SFTP"
 
 # Errors an upload can raise from either protocol's client library.
 _TRANSFER_ERRORS = (paramiko.SSHException, ftplib.Error, EOFError, OSError)
@@ -104,6 +123,10 @@ AND   s.[bill_date_corrected] >= ?
 
 class SftpUploadError(RuntimeError):
     """The upload connection could not be made (bad config, auth, host key/certificate, network)."""
+
+
+class SftpStagingError(OSError):
+    """A bill's copy did not land in the staging folder intact."""
 
 
 def _normalise(value: str | None) -> str:
@@ -491,13 +514,32 @@ class SftpSession:
             self._conn.replace(target, final)
         return final
 
-    def upload(self, local_path: str | Path, remote_name: str | None = None) -> bool:
-        """Upload local_path and write its sidecar. Returns True on success; never raises."""
+    def upload_staged(self, staged_path: str | Path) -> bool:
+        """Upload a staged copy and delete it once it is on the server.
+
+        Returns True when the file is on the server, even if the copy could
+        not then be deleted: the next sweep finds it already there with the
+        same size and deletes it then. Never raises. On False the copy stays
+        in the staging folder for the next sweep.
+        """
+        staged = Path(staged_path)
+        if not self.upload(staged, sidecar=False):
+            return False
+        try:
+            staged.unlink()
+        except FileNotFoundError:
+            pass  # another run of the same bot uploaded and removed it first
+        except OSError:
+            logger.warning("SFTP_UPLOAD - uploaded %s but could not delete the staged copy", staged, exc_info=True)
+        return True
+
+    def upload(self, local_path: str | Path, remote_name: str | None = None, *, sidecar: bool = True) -> bool:
+        """Upload local_path, writing its sidecar unless sidecar=False. Returns True on success; never raises."""
         local = Path(local_path)
         name = remote_name or local.name
         if self.broken:
             return False
-        if is_uploaded(local):
+        if sidecar and is_uploaded(local):
             return True
         if not local.is_file():
             logger.error("SFTP_UPLOAD - local file missing: %s", local)
@@ -522,7 +564,8 @@ class SftpSession:
                     continue
                 logger.error("SFTP_UPLOAD - %s upload failed: %s", name, exc)
                 return False
-            self._write_sidecar(local, remote)
+            if sidecar:
+                self._write_sidecar(local, remote)
             logger.info(
                 "SFTP_UPLOAD - uploaded %s (%d bytes) over %s to %s:%s",
                 local.name, local.stat().st_size, self.protocol.upper(), self.host, remote,
@@ -542,6 +585,65 @@ class SftpSession:
             sidecar_path(local).write_text(json.dumps(record), encoding="utf-8")
         except OSError:
             logger.exception("SFTP_UPLOAD - uploaded %s but could not write its sidecar", local)
+
+
+def staging_dir(client_name: str, supplier: str, config: dict) -> Path:
+    """{base}\\{LIVE|DEV}\\SFTP\\{client_name}\\{supplier}, the queue of bills still to upload.
+
+    *base* is ``config["pdf_auto"]["base_path"]`` when set, otherwise the
+    I: drive's UNC path, the same as ``pdf_auto_copy``. LIVE/DEV comes from
+    ``config["env"]`` ("prod"/"live" -> LIVE, "dev", the default, -> DEV);
+    any other value raises ValueError. Nothing is created here.
+    """
+    env = str(config.get("env") or "dev").lower()
+    folder = _ENV_FOLDERS.get(env)
+    if folder is None:
+        raise ValueError(f"SFTP_UPLOAD - unknown env {env!r}; expected one of {sorted(_ENV_FOLDERS)}")
+    if not (client_name or "").strip() or not (supplier or "").strip():
+        raise ValueError("SFTP_UPLOAD - staging_dir needs a client name and a supplier")
+    base = (config.get("pdf_auto") or {}).get("base_path") or _DEFAULT_STAGING_BASE
+    return Path(base) / folder / STAGING_FOLDER / client_name.strip() / supplier.strip()
+
+
+def stage(local_path: str | Path, staging: str | Path) -> Path:
+    """Copy a saved bill into the staging folder and return the copy's path.
+
+    The copy goes to ``<name>.part`` first and is renamed once its size
+    matches the source, so ``staged_files()`` (another run's sweep) never
+    picks up a half-written file. A file of the same name already staged
+    is replaced. Raises SftpStagingError (an OSError) if the copy is missing
+    or truncated, and OSError if the folder cannot be reached.
+    """
+    source = Path(local_path)
+    dest_dir = Path(staging)
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    dest = dest_dir / source.name
+    part = dest.with_name(dest.name + PART_SUFFIX)
+    shutil.copy2(source, part)
+    expected = source.stat().st_size
+    actual = part.stat().st_size if part.is_file() else None
+    if actual != expected:
+        part.unlink(missing_ok=True)
+        raise SftpStagingError(
+            f"SFTP_UPLOAD - staging copy of {source} -> {dest} is {actual} bytes, expected {expected}"
+        )
+    part.replace(dest)
+    logger.info("SFTP_UPLOAD - staged %s (%d bytes)", dest, expected)
+    return dest
+
+
+def staged_files(staging: str | Path) -> list[Path]:
+    """Files waiting in the staging folder, oldest first; [] if the folder does not exist yet.
+
+    Skips ``.part`` files (a copy still being written). Raises OSError if
+    the folder exists but cannot be listed.
+    """
+    folder = Path(staging)
+    if not folder.is_dir():
+        return []
+    files = [p for p in folder.iterdir() if p.is_file() and not p.name.endswith(PART_SUFFIX)]
+    files.sort(key=lambda p: (p.stat().st_mtime, p.name))
+    return files
 
 
 def pending_files(

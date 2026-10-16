@@ -112,6 +112,8 @@ for detail in job_details:
   `<file>.uploaded` sidecar, certificate verification (FTPS) or
   trust-on-first-use host-key pinning (SFTP), and `pending_files()` for a
   next-run sweep. (0.10.0)
+  - From 0.13.6, the recommended flow stages a copy on the I: drive (UNC) instead, the same way PDF Auto does: `stage()` puts it in `staging_dir()` (`ODC\{LIVE|DEV}\SFTP\{client}\{supplier}`), and `upload_staged()` uploads it and deletes the copy.
+  - The sweep is `staged_files()`, so it never depends on the runner's drive mappings.
 - `graph_client.py` - Microsoft Graph helpers: `send_mail()` and
   `read_otp_code()` (polls a mailbox for a passwordless-login OTP email).
   Both read `client_id`/`client_secret`/`tenant_id`/`sender_address` from a
