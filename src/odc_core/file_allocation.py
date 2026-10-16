@@ -100,9 +100,15 @@ def allocate(
     invoice_number: str,
     config: dict,
     sug_internal_id: str | None = None,
+    include_meter: bool = True,
 ) -> dict:
     """
     Determine the full file path and folder structure for a downloaded invoice.
+
+    `include_meter=False` leaves the meter out of a non-Inspired filename
+    (``{supplier}_{account}_{utility}_{invoice}_{yyyymmdd}``, the same shape
+    as the Inspired one). Grab-all uses it: its bills are named by the
+    account and invoice number the portal shows.
 
     For Inspired PLC and Ignite, files go into a per-customer folder. With a
     `sug_internal_id` on a production run, the folder is the one the customer
@@ -146,8 +152,9 @@ def allocate(
             tree=_tree(config),
             source=SOURCE,
         )
+        meter_part = f"_{meter_number}" if include_meter else ""
         filename = (
-            f"{supplier}_{account_reference}_{meter_number}"
+            f"{supplier}_{account_reference}{meter_part}"
             f"_{normalised_utility}_{invoice_number}_{bill_date_yyyymmdd}"
         )
 

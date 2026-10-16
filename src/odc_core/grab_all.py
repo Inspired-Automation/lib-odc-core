@@ -13,9 +13,11 @@ That breaks three assumptions the account-search helpers make:
 - ``duplicate_check.is_duplicate()`` joins through ``ODC_job_details``.
   ``is_duplicate()`` here checks the grab-all table (``tables["grab_all_data"]``)
   instead, joined to ``ODC_jobs`` for supplier/client.
-- Portal-derived values can be blank. ``allocate()`` fills those in before
-  delegating to ``file_allocation.allocate()``, so the folder and filename
-  convention is identical to account-search downloads.
+- Portal-derived values can be blank. ``allocate()`` fills a blank utility
+  in before delegating to ``file_allocation.allocate()``, so the folder
+  convention is identical to account-search downloads. The filename leaves
+  the meter out (0.13.4): a grab-all bill is named by the account and invoice
+  number the portal shows, ``{supplier}_{account}_{utility}_{invoice}_{yyyymmdd}``.
 - ``file_save_as.save()`` inserts ODC_scrape_data's column set, which
   includes ``job_details_id``. ``ODC_grab_all_data`` has no such column (a
   grab-all file has no job_details row), so ``save()`` here inserts the
@@ -38,8 +40,8 @@ from .jobstodo import _UPDATE_PROCESS_ID
 
 logger = logging.getLogger(__name__)
 
-#: Substituted for a blank meter number or utility so a filename never ends
-#: up with an empty segment (``..._ACC1__Elec_...``).
+#: Substituted for a blank utility so a filename never ends up with an empty
+#: segment (``..._ACC1__INV1_...``).
 UNKNOWN = "UNKNOWN"
 
 _SELECT_JOB = """
@@ -196,26 +198,23 @@ def allocate(
     supplier: str,
     client_location: str,
     utility: str,
-    meter_number: str,
     doc_type: str,
     bill_date_corrected: str,
     file_extension: str,
     invoice_number: str,
     config: dict,
+    meter_number: str = "",
     sug_internal_id: str | None = None,
 ) -> dict:
     """Return ``file_allocation.allocate()``'s result for a portal-derived bill.
 
-    A blank meter_number or utility (the portal did not show one) becomes
-    ``UNKNOWN`` with a warning, then everything is passed straight through,
-    so the folder and filename convention is exactly the account-search one.
+    The filename is ``{supplier}_{account}_{utility}_{invoice}_{yyyymmdd}``:
+    no meter, so every grab-all bot names its files by the portal's account
+    and invoice number alone. ``meter_number`` is accepted for compatibility
+    with existing callers and not used. A blank utility (the portal did not
+    show one) becomes ``UNKNOWN`` with a warning; the folder convention is
+    exactly the account-search one.
     """
-    if not (meter_number or "").strip():
-        logger.warning(
-            "GRAB_ALL - blank meter_number for account %s, invoice %s - using %s",
-            account_reference, invoice_number, UNKNOWN,
-        )
-        meter_number = UNKNOWN
     if not (utility or "").strip():
         logger.warning(
             "GRAB_ALL - blank utility for account %s, invoice %s - using %s",
@@ -230,13 +229,14 @@ def allocate(
         supplier=supplier,
         client_location=client_location,
         utility=utility,
-        meter_number=meter_number,
+        meter_number="",
         doc_type=doc_type,
         bill_date_corrected=bill_date_corrected,
         file_extension=file_extension,
         invoice_number=invoice_number,
         config=config,
         sug_internal_id=sug_internal_id,
+        include_meter=False,
     )
 
 

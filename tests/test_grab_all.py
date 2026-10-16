@@ -124,20 +124,32 @@ def test_allocate_passes_values_through(mock_allocate):
 
     assert result == {"client_filepath": "x"}
     called = mock_allocate.call_args.kwargs
-    assert called["meter_number"] == "10012345678"
+    assert called["include_meter"] is False
+    assert called["meter_number"] == ""
     assert called["utility"] == "Electricity"
     assert called["sug_internal_id"] is None
 
 
 @patch("odc_core.grab_all.file_allocation.allocate")
-def test_allocate_substitutes_unknown_for_blank_meter_and_utility(mock_allocate):
+def test_allocate_substitutes_unknown_for_blank_utility_only(mock_allocate):
     mock_allocate.return_value = {}
 
     grab_all.allocate(**_allocate_kwargs(meter_number=" ", utility=None))
 
     called = mock_allocate.call_args.kwargs
-    assert called["meter_number"] == grab_all.UNKNOWN
+    assert called["meter_number"] == ""
     assert called["utility"] == grab_all.UNKNOWN
+
+
+@patch("odc_core.grab_all.file_allocation.allocate")
+def test_allocate_meter_number_is_optional(mock_allocate):
+    mock_allocate.return_value = {}
+    kwargs = _allocate_kwargs()
+    del kwargs["meter_number"]
+
+    grab_all.allocate(**kwargs)
+
+    assert mock_allocate.call_args.kwargs["include_meter"] is False
 
 
 def _save_kwargs(staging_path, target_path):

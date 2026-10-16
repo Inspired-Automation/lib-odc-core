@@ -367,6 +367,12 @@ entry point of its own.
   entry.
 
 ## Change Log
+- 2026-10-16: v0.13.4 - PATCH. Grab-all filenames drop the meter:
+  `grab_all.allocate()` calls `file_allocation.allocate(..., include_meter=False)`
+  (new keyword, default `True`), giving
+  `{supplier}_{account}_{utility}_{invoice}_{yyyymmdd}` from the portal's
+  account and invoice number. `meter_number` is optional and ignored there;
+  blank utility still becomes `UNKNOWN`. Account search unchanged. 174 tests pass.
 - 2026-10-15: v0.13.3 - PATCH. `human_in_loop` now comes from the job
   first: `get_job_details()` and `grab_all.get_job()` select
   `COALESCE(j.[human_in_loop], s.[human_in_loop]) AS [human_in_loop]`, so the

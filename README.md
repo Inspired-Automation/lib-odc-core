@@ -93,8 +93,8 @@ for detail in job_details:
   every account on the portal instead of looping `ODC_job_details`:
   `get_job()`/`is_grab_all_job()` (read the job row and decide the mode),
   `claim_job()`, `is_duplicate()` (checks `ODC_grab_all_data` only),
-  `allocate()` (fills blank portal values, then the same convention as
-  `file_allocation.allocate()`) and `save()` (the `file_save_as.save()`
+  `allocate()` (the `file_allocation.allocate()` folder convention, with a
+  filename of portal account and invoice number and no meter) and `save()` (the `file_save_as.save()`
   equivalent for `ODC_grab_all_data`'s own column set).
 - `duplicate_check.py` - `is_duplicate()`: has this invoice already been
   recorded? Standard suppliers check `ODC_scrape_data` directly; `client_name

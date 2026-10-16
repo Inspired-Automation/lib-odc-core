@@ -45,6 +45,29 @@ def test_allocate_standard_client(tmp_path):
     assert tmp_path.exists()
 
 
+def test_allocate_standard_client_without_meter(tmp_path):
+    config = {"file_allocation": {"doc_types": [], "statuses": [], "utilities": []}}
+
+    result = file_allocation.allocate(
+        client_name="Horizon",
+        customer_name="Acme Ltd",
+        account_reference="ACC123",
+        supplier="SSE Airtricity",
+        client_location=str(tmp_path),
+        utility="Electricity",
+        meter_number="M001",
+        doc_type="I",
+        bill_date_corrected="2026-07-01",
+        file_extension="pdf",
+        invoice_number="INV1",
+        config=config,
+        include_meter=False,
+    )
+
+    assert result["complete_filename"] == "SSE Airtricity_ACC123_Elec_INV1_20260701"
+    assert result["client_filepath"].endswith("SSE Airtricity_ACC123_Elec_INV1_20260701.pdf")
+
+
 def test_allocate_standard_client_letter_doc_type(tmp_path):
     config = {"file_allocation": {"doc_types": [], "statuses": [], "utilities": []}}
 

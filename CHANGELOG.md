@@ -5,6 +5,21 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.13.4] - 2026-10-16
+### Changed
+- `grab_all.allocate()` leaves the meter out of the filename. A grab-all
+  bill is now named by the account and invoice number the portal shows:
+  `{supplier}_{account_reference}_{utility}_{invoice_number}_{YYYYMMDD}`
+  (was `{supplier}_{account_reference}_{meter_number}_{utility}_...`, with
+  `UNKNOWN` for a blank meter). Same for every grab-all bot (SSE Airtricity,
+  Energia, Electric Ireland). The folder is unchanged. `meter_number` is now
+  optional and ignored, so existing callers need no code change. A blank
+  utility still becomes `UNKNOWN`.
+### Added
+- `file_allocation.allocate(..., include_meter=True)`. `False` drops
+  `_{meter_number}` from a non-Inspired filename. The default keeps
+  account-search names unchanged.
+
 ## [0.13.3] - 2026-10-15
 ### Changed
 - `human_in_loop` on `jobstodo.get_job_details()` rows and on

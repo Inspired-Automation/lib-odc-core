@@ -359,7 +359,7 @@ Folder names are made safe for Windows (`safe_folder_name`).
 | | Inspired PLC, Ignite | Every other client |
 |---|---|---|
 | Folder | `{client_location}/{company_name}/{INVOICE\|LETTER}/NEW/{utility}` | `{client_location}/{YYYY-MM}` |
-| Filename | `{supplier}_{account_reference}_{utility}_{invoice_number}_{YYYYMMDD}` | `{supplier}_{account_reference}_{meter_number}_{utility}_{invoice_number}_{YYYYMMDD}` |
+| Filename | `{supplier}_{account_reference}_{utility}_{invoice_number}_{YYYYMMDD}` | `{supplier}_{account_reference}_{meter_number}_{utility}_{invoice_number}_{YYYYMMDD}`, or without `_{meter_number}` when `include_meter=False` (0.13.4, used by `grab_all.allocate()`) |
 | Extra | Builds the full doc_type/status/utility tree when the destination is missing (no `sugar_id.txt` from 0.12.0) | Creates the month folder only |
 
 `doc_type == "O"` maps to `LETTER`; anything else maps to `INVOICE`. Utility is
@@ -388,9 +388,9 @@ claim_job(job_id, process_id, tables, dsn) -> None
 is_duplicate(account_reference, supplier, client_name, unique_file_ref,
              tables, dsn) -> bool
 allocate(*, client_name, customer_name, account_reference, supplier,
-         client_location, utility, meter_number, doc_type,
+         client_location, utility, doc_type,
          bill_date_corrected, file_extension, invoice_number,
-         config, sug_internal_id=None) -> dict
+         config, meter_number="", sug_internal_id=None) -> dict
 save(*, staging_path, target_path, job_id, account_reference,
      unique_file_ref, bill_date, bill_date_corrected, original_filename,
      complete_filename, file_extension, client_filepath, customer_name,
@@ -406,8 +406,13 @@ save(*, staging_path, target_path, job_id, account_reference,
   `ODC_jobs` on `job_id` (for supplier/client). It never consults
   `ODC_scrape_data`, and is not keyed on job_id, so recreating a job does not
   re-download.
-- `allocate()` substitutes `UNKNOWN` for a blank `meter_number`/`utility`,
-  then calls `file_allocation.allocate()` unchanged.
+- `allocate()` (0.13.4) names a grab-all bill by the portal's account and
+  invoice number with no meter:
+  `{supplier}_{account_reference}_{utility}_{invoice_number}_{YYYYMMDD}`.
+  It calls `file_allocation.allocate(..., include_meter=False)`, so the
+  folder is the account-search one. `meter_number` is optional and ignored.
+  A blank `utility` becomes `UNKNOWN`. Before 0.13.4 the meter was in the
+  name, with `UNKNOWN` for a blank one.
 - `save()` behaves like `file_save_as.save()` (move, insert, VOID if under
   1 KB) but inserts `ODC_grab_all_data`'s own column set, which has no
   `job_details_id`/`account_type`/`zip_address`. The insert uses
