@@ -87,6 +87,7 @@ sftp:                       # 0.10.0, sftp_upload callers only
   atomic_rename: true       # 0.13.2: false = no .part + rename
   host_key:                 # sftp only; optional; blank = trust on first use
   known_hosts_file: config/sftp_known_hosts   # sftp only
+  accept_any_host_key: false  # 0.13.5, sftp only: true = no host key check
   clients: []
   timeout_s: 60
 
@@ -560,6 +561,11 @@ with SftpSession(config) as session:      # raises SftpUploadError if it cannot 
   `known_hosts_file` and its SHA256 fingerprint logged at WARNING; any other
   key afterwards (including a different key type) refuses the connection.
   Never `AutoAddPolicy`.
+- `accept_any_host_key` (0.13.5, default false): true accepts any SFTP host
+  key with no pin and no save; `host_key` and `known_hosts_file` are
+  ignored, and the offered fingerprint is logged at WARNING on every
+  connection. Opt-in per bot, for a network that re-signs SSH with a
+  changing key. Same true/false parsing as `atomic_rename`.
 - `pending_files()`: `client_file_path` from `ODC_scrape_data` (via
   `ODC_job_details` -> `ODC_jobs`) and, when `tables` has `grab_all_data`,
   `ODC_grab_all_data` (via `ODC_jobs`), for the supplier/client with

@@ -5,6 +5,19 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.13.5] - 2026-10-16
+### Added
+- `config["sftp"]["accept_any_host_key"]` (default `false`, so behaviour is
+  unchanged). `true` turns SFTP host key checking off: any key the server
+  offers is accepted, nothing is pinned or saved, and `host_key` /
+  `known_hosts_file` are ignored. The offered fingerprint is logged at
+  WARNING on every connection. Added for the bot runners, whose network
+  presents a different 2048-bit key on each connection to
+  `ftp.daisyprod.systems-link.com` (the server's own key, seen from outside
+  that network, is RSA 4096 `SHA256:aF9D1o4YWFBuAlkiSsPys1c4ZScBAo5roFhfSRL2HaY`).
+  With it on, a bot cannot tell the real server from anything in between.
+  Accepts the same true/false text as `atomic_rename`.
+
 ## [0.13.4] - 2026-10-16
 ### Changed
 - `grab_all.allocate()` leaves the meter out of the filename. A grab-all

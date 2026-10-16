@@ -187,6 +187,7 @@ sftp:
   atomic_rename: true     # false = put straight to the final name (no .part + rename)
   host_key:               # sftp only: optional "<type> <base64>"; blank = trust on first use
   known_hosts_file: config/sftp_known_hosts   # sftp only
+  accept_any_host_key: false   # sftp only: true = no host key check at all (logged every connection)
   clients: []             # client_name values whose files are uploaded
   timeout_s: 60
 ```

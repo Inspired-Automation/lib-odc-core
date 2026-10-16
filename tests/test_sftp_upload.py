@@ -439,6 +439,49 @@ def test_connect_bad_host_key_raises_clear_error(tmp_path, rsa_keys):
         client_cls.return_value.close.assert_called_once()
 
 
+def test_accept_any_host_key_policy_accepts_and_saves_nothing(tmp_path, rsa_keys, caplog):
+    key, _ = rsa_keys
+    client = paramiko.SSHClient()
+    policy = sftp_upload._AcceptAnyHostKeyPolicy("sftp.example.test")
+
+    with caplog.at_level("WARNING", logger="odc_core.sftp_upload"):
+        policy.missing_host_key(client, "sftp.example.test", key)
+
+    assert not client.get_host_keys().lookup("sftp.example.test")
+    assert sftp_upload.fingerprint(key) in caplog.text
+    assert "checking is OFF" in caplog.text
+
+
+def test_connect_accept_any_host_key_ignores_pins(tmp_path, rsa_keys):
+    key, _ = rsa_keys
+    known = tmp_path / "known_hosts"
+    known.write_text("placeholder\n")
+    session = SftpSession(_config(
+        tmp_path, protocol="sftp", accept_any_host_key="true",
+        host_key=f"{key.get_name()} {key.get_base64()}",
+    ))
+    with patch.object(paramiko, "SSHClient") as client_cls:
+        client = client_cls.return_value
+        session.connect()
+    policy = client.set_missing_host_key_policy.call_args.args[0]
+    assert isinstance(policy, sftp_upload._AcceptAnyHostKeyPolicy)
+    client.load_host_keys.assert_not_called()
+    client.get_host_keys.return_value.add.assert_not_called()
+
+
+def test_accept_any_host_key_defaults_off(tmp_path):
+    session = SftpSession(_config(tmp_path, protocol="sftp"))
+    with patch.object(paramiko, "SSHClient") as client_cls:
+        session.connect()
+    policy = client_cls.return_value.set_missing_host_key_policy.call_args.args[0]
+    assert isinstance(policy, sftp_upload._TrustOnFirstUsePolicy)
+
+
+def test_accept_any_host_key_rejects_bad_value(tmp_path):
+    with pytest.raises(SftpUploadError, match="accept_any_host_key"):
+        SftpSession(_config(tmp_path, protocol="sftp", accept_any_host_key="maybe"))
+
+
 def test_host_entry_non_default_port():
     assert sftp_upload._host_entry("h", 22) == "h"
     assert sftp_upload._host_entry("h", 2222) == "[h]:2222"

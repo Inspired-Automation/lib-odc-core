@@ -101,7 +101,8 @@ entry point of its own.
   via its own `config.yaml`.
 - FTPS/SFTP (`sftp_upload.py`): per-client upload of filed documents.
   Protocol (`ftps` default since 0.13.0, or `sftp`), host, port,
-  username, password, remote_dir, host_key/known_hosts_file (SFTP only),
+  username, password, remote_dir, host_key/known_hosts_file/
+  accept_any_host_key (SFTP only),
   clients and timeout_s come from the caller's `config["sftp"]`;
   credentials only ever from `config.yaml` / the Control Room Runtime
   config panel, never logged. The client's server
@@ -367,6 +368,13 @@ entry point of its own.
   entry.
 
 ## Change Log
+- 2026-10-16: v0.13.5 - PATCH. New `config["sftp"]["accept_any_host_key"]`
+  (default false): true accepts any SFTP host key without pinning, logging
+  the fingerprint at WARNING each connection. For bot runners whose network
+  re-signs SSH to `ftp.daisyprod.systems-link.com` with a changing 2048-bit
+  key (3 different keys seen on botrunner10 on 2026-10-16; the real server
+  key is RSA 4096 `SHA256:aF9D1o4YWFBuAlkiSsPys1c4ZScBAo5roFhfSRL2HaY`).
+  Opt-in per bot; turn it off once the runners reach the server directly.
 - 2026-10-16: v0.13.4 - PATCH. Grab-all filenames drop the meter:
   `grab_all.allocate()` calls `file_allocation.allocate(..., include_meter=False)`
   (new keyword, default `True`), giving

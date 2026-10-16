@@ -40,6 +40,13 @@ wins; otherwise the key saved in ``known_hosts_file`` on the first
 connection is the only one accepted afterwards. A changed key refuses the
 connection. ``paramiko.AutoAddPolicy`` is never used.
 
+``config["sftp"]["accept_any_host_key"]: true`` (0.13.5, default false)
+turns host key checking off for that bot: whatever key the server offers is
+accepted, nothing is pinned or saved, and ``host_key``/``known_hosts_file``
+are ignored. Every connection logs the offered fingerprint at WARNING. It
+exists for a runner whose network re-signs SSH with a key that changes, and
+means the bot can no longer tell the real server from anything in between.
+
 Credentials come only from the caller's ``config["sftp"]`` (``config.yaml`` /
 the Control Room Runtime config panel) and are never logged.
 """
@@ -186,6 +193,25 @@ class _TrustOnFirstUsePolicy(paramiko.MissingHostKeyPolicy):
         )
 
 
+class _AcceptAnyHostKeyPolicy(paramiko.MissingHostKeyPolicy):
+    """Accept whatever key the server offers, without pinning or saving it.
+
+    Only used when ``sftp.accept_any_host_key`` is true. The client starts
+    with no known keys, so paramiko calls this on every connection and the
+    offered fingerprint is logged every time.
+    """
+
+    def __init__(self, host_entry: str) -> None:
+        self._entry = host_entry
+
+    def missing_host_key(self, client: paramiko.SSHClient, hostname: str, key: paramiko.PKey) -> None:
+        logger.warning(
+            "SFTP_UPLOAD - host key checking is OFF (sftp.accept_any_host_key): accepted %s %s from %s "
+            "without checking it",
+            key.get_name(), fingerprint(key), self._entry,
+        )
+
+
 class _SftpConnection:
     """paramiko SFTP behind the small interface SftpSession uploads through."""
 
@@ -197,13 +223,16 @@ class _SftpConnection:
         self._timeout_s = timeout_s
         self._host_key: str = (sftp_cfg.get("host_key") or "").strip()
         self._known_hosts = Path(sftp_cfg.get("known_hosts_file") or DEFAULT_KNOWN_HOSTS_FILE)
+        self._accept_any_host_key = _config_flag(sftp_cfg.get("accept_any_host_key"), False, "accept_any_host_key")
         self._client: paramiko.SSHClient | None = None
         self._sftp: paramiko.SFTPClient | None = None
 
     def connect(self) -> None:
         entry = _host_entry(self._host, self._port)
         client = paramiko.SSHClient()
-        if self._host_key:
+        if self._accept_any_host_key:
+            client.set_missing_host_key_policy(_AcceptAnyHostKeyPolicy(entry))
+        elif self._host_key:
             key = _parse_host_key(self._host_key)
             client.get_host_keys().add(entry, key.get_name(), key)
             client.set_missing_host_key_policy(paramiko.RejectPolicy())
