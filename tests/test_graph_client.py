@@ -177,3 +177,30 @@ def test_read_otp_code_times_out(mock_token, mock_list, mock_time, mock_sleep):
             timeout_s=5,
             poll_interval_s=0,
         )
+
+
+@patch("odc_core.graph_client.requests.post")
+@patch("odc_core.graph_client._acquire_token", return_value="tok")
+def test_send_mail_reply_to_and_sender_override(mock_token, mock_post):
+    mock_post.return_value = MagicMock(status_code=202)
+
+    graph_client.send_mail(
+        CONFIG, "to@example.com", "Subj", "Body",
+        reply_to="support@example.com", sender_address="noreply@example.com",
+    )
+
+    url = mock_post.call_args.args[0]
+    payload = mock_post.call_args.kwargs["json"]
+    assert "/users/noreply@example.com/sendMail" in url
+    assert payload["message"]["replyTo"] == [{"emailAddress": {"address": "support@example.com"}}]
+
+
+@patch("odc_core.graph_client.requests.post")
+@patch("odc_core.graph_client._acquire_token", return_value="tok")
+def test_send_mail_defaults_unchanged(mock_token, mock_post):
+    mock_post.return_value = MagicMock(status_code=202)
+
+    graph_client.send_mail(CONFIG, "to@example.com", "Subj", "Body")
+
+    assert "/users/bot@example.com/sendMail" in mock_post.call_args.args[0]
+    assert "replyTo" not in mock_post.call_args.kwargs["json"]["message"]

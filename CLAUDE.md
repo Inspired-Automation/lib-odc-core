@@ -368,6 +368,25 @@ entry point of its own.
   entry.
 
 ## Change Log
+- 2026-10-19: v0.13.7 - PATCH. New `login_failure` module so every supplier
+  bot handles a failed login the same way: `handle_login_failure()` logs and
+  either emails the client or raises the team alert through `errors.add()`
+  with one wording (no team alert once the client is emailed, or was within
+  the cooldown; both if the client email fails). It emails
+  the client for credential problems only (rejected / locked / password
+  change required), never for Inspired PLC or Ignite, only when the login
+  username is an email address, only on prod runs (dev: `dev_recipient` or
+  nothing), and at most once per supplier+login per 24h (marker files under
+  `{pdf_auto.base_path}\{LIVE|DEV}\LOGIN_FAILURE_NOTICES`, the same UNC root
+  as SFTP staging, so every runner sees them). From
+  `noreply_automation@inspiredenergy.co.uk`, Reply-To
+  `support@systems-link.com`, signed "Many Thanks". Suppliers classify with
+  `classify_portal_message()` on portal-displayed text only: Playwright
+  exception strings quote selectors (Castle's `_INVALID_CREDS` selector reads
+  "password invalid"), so classifying them would email clients about our own
+  timeouts. `graph_client.send_mail()` gains `reply_to`/`sender_address`
+  keywords. All 18 supplier bots rewired and re-pinned the same day (Water
+  Plus is still the empty template). Released 2026-10-19.
 - 2026-10-16: v0.13.6 - PATCH. SFTP staging, the same pattern as
   `pdf_auto_copy`. New `sftp_upload.staging_dir()` (`{base}\{LIVE|DEV}\SFTP\{client}\{supplier}`,
   where `base` is `pdf_auto.base_path` or the I: drive's UNC path), `stage()`
@@ -960,6 +979,12 @@ entry point of its own.
   does not exist and made the documented `pip install` URLs 404).
 
 ## Outstanding TODOs
+- v0.13.7 released 2026-10-19. Mail.Send as
+  `noreply_automation@inspiredenergy.co.uk` confirmed the same day (test
+  sends accepted by Graph). Still to confirm: the bot runners can write to
+  `ODC\LIVE\LOGIN_FAILURE_NOTICES`. If they cannot read it, the client is
+  not emailed and the team gets "login-failure email to the client failed";
+  if they can read but not write it, the client is re-emailed every run.
 - Release v0.13.3 (done 2026-10-15). `sql/11` is already on both DEV and
   live `Titan_INSE` (confirmed 2026-10-15), so live bots can pin it once
   released.

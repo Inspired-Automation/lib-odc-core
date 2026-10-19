@@ -119,6 +119,19 @@ for detail in job_details:
   Both read `client_id`/`client_secret`/`tenant_id`/`sender_address` from a
   caller-supplied `config["graph"]` dict - never hardcode Graph credentials
   here or in a calling project.
+- `login_failure.py` (0.13.7) - the one login-failure path for every supplier
+  bot. `handle_login_failure(errors, config, supplier_name=..., job_id=...,
+  row=..., detail=..., kind=...)` logs, and either emails the client or
+  raises the team alert via `errors.add()` - never both, except when the
+  client email fails. It emails the client at the login address when the kind
+  is a credential problem (`CREDENTIALS_REJECTED`, `ACCOUNT_LOCKED`,
+  `PASSWORD_CHANGE_REQUIRED`), the client is not Inspired PLC or Ignite, the
+  username is an email address, the run is prod, and that supplier+login was
+  not emailed in the last `cooldown_hours`. Sent from
+  `noreply_automation@inspiredenergy.co.uk` with Reply-To
+  `support@systems-link.com`; never includes the password. Suppliers set
+  `self._login_failure_kind` using `classify_portal_message()` on text the
+  portal displayed (never on exception text) and `escalate()`.
 - `browser_helpers.py` - human-like pacing/click/type helpers and error
   screenshot capture for Playwright/patchright-based suppliers. Plain
   functions taking `page`/`config` explicitly (no base class - each supplier
@@ -192,6 +205,15 @@ sftp:
   accept_any_host_key: false   # sftp only: true = no host key check at all (logged every connection)
   clients: []             # client_name values whose files are uploaded
   timeout_s: 60
+
+# login_failure (0.13.7). Every key optional; defaults shown.
+login_failure_notification:
+  enabled: true
+  sender_address: noreply_automation@inspiredenergy.co.uk   # Graph app needs Mail.Send on it
+  reply_to: support@systems-link.com
+  cooldown_hours: 24
+  dev_recipient: ""       # dev runs email only this address, if set
+  state_dir: ""           # default {pdf_auto.base_path}\{LIVE|DEV}\LOGIN_FAILURE_NOTICES
 ```
 
 ## Development

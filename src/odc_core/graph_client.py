@@ -47,10 +47,23 @@ def _acquire_token(config: dict) -> str:
     return result["access_token"]
 
 
-def send_mail(config: dict, recipient: str, subject: str, body: str) -> None:
-    """Send an email via Microsoft Graph as config['graph']['sender_address']."""
+def send_mail(
+    config: dict,
+    recipient: str,
+    subject: str,
+    body: str,
+    *,
+    reply_to: str | None = None,
+    sender_address: str | None = None,
+) -> None:
+    """Send a plain-text email via Microsoft Graph.
+
+    Sends as *sender_address* when given (the Graph app needs Mail.Send on
+    that mailbox), else as config['graph']['sender_address']. *reply_to*
+    sets the message's Reply-To.
+    """
     graph_config = config.get("graph", {})
-    sender_address = graph_config.get("sender_address")
+    sender_address = sender_address or graph_config.get("sender_address")
     if not sender_address:
         raise ValueError("GRAPH_CLIENT - config['graph']['sender_address'] is required")
 
@@ -63,6 +76,8 @@ def send_mail(config: dict, recipient: str, subject: str, body: str) -> None:
             "toRecipients": [{"emailAddress": {"address": recipient}}],
         }
     }
+    if reply_to:
+        payload["message"]["replyTo"] = [{"emailAddress": {"address": reply_to}}]
     headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
     response = requests.post(url, headers=headers, json=payload, timeout=30)
     if response.status_code >= 300:

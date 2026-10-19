@@ -475,14 +475,16 @@ so something else must reset the row to `pending` if it needs to run again.
 ### 3.7 `graph_client` - Microsoft Graph
 
 ```python
-send_mail(config: dict, recipient: str, subject: str, body: str) -> None
+send_mail(config: dict, recipient: str, subject: str, body: str, *,
+          reply_to: str | None = None, sender_address: str | None = None) -> None
 read_otp_code(config: dict, mailbox: str, login_time: datetime, *,
               subject_contains: str, body_start: str, body_end: str,
               timeout_s: int = 3600, poll_interval_s: int = 10) -> str
 ```
 
-`send_mail()` sends as `config["graph"]["sender_address"]` and raises
-`RuntimeError` on any non-2xx Graph response.
+`send_mail()` sends as `sender_address` if given, else
+`config["graph"]["sender_address"]`, sets Reply-To when `reply_to` is given
+(0.13.7), and raises `RuntimeError` on any non-2xx Graph response.
 
 `read_otp_code()` polls `mailbox` for messages received after `login_time` whose
 subject contains `subject_contains`, extracts the first 4-8 digit group found
@@ -490,6 +492,39 @@ between `body_start` and `body_end`, and returns it. Poll errors are logged and
 retried. Raises `TimeoutError` when `timeout_s` elapses with no code. A message
 that matches the subject but contains no digit group is skipped rather than
 accepted, so polling continues.
+
+### 3.7a `login_failure` - uniform login-failure handling (0.13.7)
+
+```python
+class LoginFailureKind(StrEnum):
+    CREDENTIALS_REJECTED, ACCOUNT_LOCKED, PASSWORD_CHANGE_REQUIRED, OTHER
+classify_portal_message(text: str | None) -> LoginFailureKind
+escalate(current, new) -> LoginFailureKind
+handle_login_failure(errors, config: dict, *, supplier_name: str, job_id,
+                     row: dict | None = None, detail: str | None = None,
+                     kind=None, username: str | None = None,
+                     portal_url: str | None = None, client_name: str | None = None,
+                     team_alert: bool = True) -> bool
+```
+
+Every supplier bot's `main.py` reports a failed login through
+`handle_login_failure()`, passing the supplier's `_login_failure_detail` and
+`_login_failure_kind`. It logs one ERROR line, calls
+`errors.add("<supplier> login failed for job <id> (<kind>): <detail>")`
+unless `team_alert=False`, and emails the client (returns True) when all of:
+the kind is one of the three credential kinds; `client_name` is not an
+Inspired-process client (Inspired PLC, Ignite); the username (from `row`, or
+the `username` override) is an email address; `config["env"]` is prod (a dev
+run sends to `login_failure_notification.dev_recipient` if set, else nothing);
+and no marker for the same supplier+login is younger than `cooldown_hours`.
+Never raises. The email is plain text from
+`noreply_automation@inspiredenergy.co.uk`, Reply-To
+`support@systems-link.com`, and never includes the password.
+
+Suppliers set `_login_failure_kind` from `classify_portal_message()` on text
+the portal displayed on its login page, combined across retries with
+`escalate()`, or explicitly from a dedicated check (an invalid-credentials
+banner, a forced password-change page). Never from exception text.
 
 ### 3.8 `validate_username`
 
@@ -788,6 +823,7 @@ src/odc_core/
 ├── updatejobdetails.py    # spODC_job_details_UpdateStatus wrapper
 ├── sugar_client.py        # SugarCRM account name lookup by internal id
 ├── graph_client.py        # Graph send_mail + read_otp_code
+├── login_failure.py       # uniform login-failure log/team alert/client email
 ├── validate_username.py   # portal username sanity check
 ├── pdf_auto_copy.py       # copy into the PDF Auto drop folder
 └── browser_helpers.py     # human pacing, screenshots, cookie banners

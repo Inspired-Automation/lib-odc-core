@@ -5,6 +5,16 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.13.7] - 2026-10-19
+### Added
+- `login_failure` module: one login-failure path for every supplier bot.
+  - `handle_login_failure(errors, config, *, supplier_name, job_id, row, detail, kind, username=None, portal_url=None, client_name=None, team_alert=True)` logs one ERROR line and emails the client when the rules allow; otherwise it raises the team alert through `errors.add()` with the same wording for every supplier. A client emailed now or within the cooldown gets no team alert. Never raises; a failed client email raises the team alert plus its own error.
+  - Client email rules: kind is `CREDENTIALS_REJECTED`, `ACCOUNT_LOCKED` or `PASSWORD_CHANGE_REQUIRED` (our-side faults are `OTHER`, team only); client is not Inspired PLC or Ignite (`file_allocation_core.routing.is_inspired_client`); the login username is an email address; production run (a dev run sends to `login_failure_notification.dev_recipient` if set, else nothing); not already emailed for the same supplier+login within `cooldown_hours` (default 24, tracked by a marker file under `{pdf_auto.base_path}\{LIVE|DEV}\LOGIN_FAILURE_NOTICES`, fail-closed if unreadable).
+  - Sent from `noreply_automation@inspiredenergy.co.uk` with Reply-To `support@systems-link.com`, signed "Many Thanks". Never contains the password.
+  - `LoginFailureKind`, `classify_portal_message()` (portal-displayed text only, never exception text) and `escalate()` for suppliers to tag why a login failed.
+  - `team_alert=False` for multi-credential loops, where one credential failing is not a job failure.
+- `graph_client.send_mail()` gains keyword-only `reply_to` and `sender_address`. Defaults unchanged.
+
 ## [0.13.6] - 2026-10-16
 ### Added
 - SFTP staging in `sftp_upload`, the same pattern as `pdf_auto_copy`:
