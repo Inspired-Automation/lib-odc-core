@@ -111,6 +111,7 @@ env: dev
 | `pdf_auto_copy` | `config["env"]` (`prod`/`live`/`dev`), `config["pdf_auto"]["base_path"]` |
 | `validate_username` | nothing |
 | `grab_all` | `tables["jobs"]`, `tables["grab_all_data"]`, `dsn`; `allocate()` needs the same config as `file_allocation` |
+| `grab_all_progress` | `tables["grab_all_cycle"]`, `tables["grab_all_progress"]`, `dsn` |
 | `sftp_upload` | `config["sftp"]`; `pending_files()` also `tables["jobs"]`, `tables["job_details"]`, `tables["scrape_data"]`, optional `tables["grab_all_data"]`, `dsn` |
 
 Graph credentials are never hardcoded in this package. A caller that omits
@@ -418,6 +419,65 @@ save(*, staging_path, target_path, job_id, account_reference,
   1 KB) but inserts `ODC_grab_all_data`'s own column set, which has no
   `job_details_id`/`account_type`/`zip_address`. The insert uses
   `OUTPUT INSERTED.id`, and the VOID update targets that id. Keyword-only.
+
+#### Completion email to the toolkit user (0.13.8)
+
+```python
+notify_requester(config, *, job, job_id, process_id, tables, dsn) -> bool
+find_requester(process_id, config, dsn) -> tuple[str, str] | None   # (email, display_name)
+count_saved(job_id, process_id, tables, dsn) -> tuple[int, int]     # (bills, accounts)
+build_completion_email(*, job, job_id, bills, accounts, recipient_name="") -> tuple[str, str]
+```
+
+- A supplier calls `notify_requester()` once a grab-all run has finished end
+  to end with no errors (`not errors.has_errors()`, after the SFTP summary).
+- The recipient is the inse-toolkit user whose run row has
+  `control_room_job_id = process_id`
+  (`Titan_INSE.dbo.TOOLKIT_PORTAL_SCRAPE_ASSIST_RUN` joined to
+  `TOOLKIT_USER.email`, the toolkit's own tables, on `Titan_INSE` for DEV and
+  LIVE runs alike). A scheduled run has no row: nothing is sent.
+- The bill and account counts are this run's `ODC_grab_all_data` rows
+  (`job_id` and `process_id`, VOID excluded).
+- Config, all optional:
+  ```yaml
+  grab_all_notification:
+    enabled: true            # false: never send
+    sender_address: noreply_automation@inspiredenergy.co.uk
+    toolkit_runs_table: Titan_INSE.dbo.TOOLKIT_PORTAL_SCRAPE_ASSIST_RUN
+    toolkit_users_table: Titan_INSE.dbo.TOOLKIT_USER
+  ```
+- Never raises. A failed lookup or send is logged at ERROR and returns
+  False; it is not added to the team alert, because the run succeeded.
+
+### 3.4c `grab_all_progress` - resuming a grab-all job (0.13.8)
+
+```python
+open_cycle(supplier, client_name, login_username, job_id, tables, dsn) -> Cycle
+Cycle.is_done(company_name, account_reference="") -> bool
+Cycle.status_of(company_name, account_reference="") -> str | None
+record(cycle, company_name, account_reference, status, *, bills_saved=0, job_id, process_id, tables, dsn) -> None
+close_cycle(cycle, job_id, tables, dsn) -> None
+```
+
+- A cycle is one full pass over every company and account a login can see.
+  Its key is supplier + client + login (`ODC_jobs.username`), not job id:
+  a new job row is created each day for the same login.
+- `open_cycle()` returns the open cycle (`completed_at_utc IS NULL`) for the
+  key, or inserts one, under `UPDLOCK, HOLDLOCK`; a filtered unique index
+  allows only one open cycle per key. It loads every recorded result.
+- Statuses: `DONE`, `FAILED`, `NO_ACCOUNTS`, `NOT_AUTHORISED`. `is_done()`
+  is True for all but `FAILED`, which is always retried.
+- `record()` is update-then-insert on (cycle, company, account), so a later
+  result replaces an earlier one. Company-level rows have
+  `account_reference = ""`. Names are stored with whitespace collapsed and
+  compared case-insensitively.
+- `close_cycle()` sets `completed_at_utc` once a run reaches the end of the
+  list. The caller decides when: Electric Ireland retries the cycle's
+  `FAILED` rows once first, then closes it regardless.
+- Tables `tables["grab_all_cycle"]` and `tables["grab_all_progress"]`, DDL in
+  automation-odc-electric-ireland `migrations/001`-`003`.
+- Progress is bookkeeping: a caller should log a failure here and carry on
+  downloading without resume rather than stop the run.
 
 ### 3.4a `sugar_client` - SugarCRM account lookup
 

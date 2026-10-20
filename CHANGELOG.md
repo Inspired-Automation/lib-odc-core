@@ -5,6 +5,23 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.13.8] - 2026-10-20
+### Added
+- `grab_all_progress` module: a grab-all job resumes where the last run stopped instead of starting again at the first company.
+  - A cycle is one full pass over everything a login can see, keyed on supplier + client + login (`ODC_jobs.username`), not job id, because a new job row is created every day for the same login.
+  - `open_cycle(supplier, client_name, login_username, job_id, tables, dsn) -> Cycle` finds the open cycle or starts one, and loads what is recorded in it.
+  - `Cycle.is_done(company_name, account_reference="")` is True for `DONE`, `NO_ACCOUNTS` and `NOT_AUTHORISED`. `FAILED` is always retried.
+  - `record(cycle, company_name, account_reference, status, *, bills_saved=0, job_id, process_id, tables, dsn)` writes one company (`account_reference=""`) or account result, overwriting an earlier one.
+  - `close_cycle(cycle, job_id, tables, dsn)` closes it once a run reaches the end of the list; the next run starts a new cycle from the top.
+  - Needs `tables["grab_all_cycle"]` and `tables["grab_all_progress"]`. The DDL is in automation-odc-electric-ireland `migrations/001`-`003`, the first consumer.
+- Why: Electric Ireland's portal ends the session about 65 minutes after login, and one Horizon login has 45 companies, one with 198 accounts. Two runs (2026-10-19 and 10-20) both died in that company, each after re-checking the same 13 companies first.
+- `grab_all.notify_requester(config, *, job, job_id, process_id, tables, dsn) -> bool`: emails the inse-toolkit user who started a grab-all run once it has completed. Call it only when the run finished with no errors.
+  - The user is found by matching the run's Control Room job id (`process_id`) to `Titan_INSE.dbo.TOOLKIT_PORTAL_SCRAPE_ASSIST_RUN.control_room_job_id`, joined to `TOOLKIT_USER.email`. A scheduled run has no toolkit row, so nobody is emailed.
+  - Subject `{supplier} Grab-all process completed`. The email gives supplier, job, and the bills and accounts this run saved (from `ODC_grab_all_data` by `process_id`, VOID excluded). Sent from `noreply_automation@inspiredenergy.co.uk`.
+  - New optional config block `grab_all_notification`: `enabled` (default true; false turns it off), `sender_address`, `toolkit_runs_table`, `toolkit_users_table`.
+  - Never raises: a failed lookup or send is logged at ERROR, not added to the team alert, because the run itself succeeded.
+  - Also `find_requester()`, `count_saved()` and `build_completion_email()`.
+
 ## [0.13.7] - 2026-10-19
 ### Added
 - `login_failure` module: one login-failure path for every supplier bot.

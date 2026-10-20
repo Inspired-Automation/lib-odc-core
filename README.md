@@ -95,7 +95,16 @@ for detail in job_details:
   `claim_job()`, `is_duplicate()` (checks `ODC_grab_all_data` only),
   `allocate()` (the `file_allocation.allocate()` folder convention, with a
   filename of portal account and invoice number and no meter) and `save()` (the `file_save_as.save()`
-  equivalent for `ODC_grab_all_data`'s own column set).
+  equivalent for `ODC_grab_all_data`'s own column set). `notify_requester()`
+  (0.13.8) emails the inse-toolkit user who started a grab-all run once it
+  completes with no errors; scheduled runs email nobody, and
+  `grab_all_notification.enabled: false` turns it off.
+- `grab_all_progress.py` (0.13.8) - resume a grab-all job where the last run
+  stopped. A cycle is one full pass over a login's companies and accounts,
+  keyed on supplier + client + login. `open_cycle()` finds or starts it,
+  `Cycle.is_done()` says what to skip (`DONE`/`NO_ACCOUNTS`/`NOT_AUTHORISED`;
+  `FAILED` is retried), `record()` writes each result as it happens, and
+  `close_cycle()` ends the cycle once a run reaches the end of the list.
 - `duplicate_check.py` - `is_duplicate()`: has this invoice already been
   recorded? Standard suppliers check `ODC_scrape_data` directly; `client_name
   == "inspired plc"` and `"ignite"` accounts are also cross-checked against
@@ -169,6 +178,7 @@ tables:
   dev:  {jobs: ..., job_details: ..., scrape_data: ..., scrape_accounts: ..., suppliers: ..., web_scrape_data: ..., multi_credential: ..., credential: ..., db_name: ...}
   live: {jobs: ..., job_details: ..., scrape_data: ..., scrape_accounts: ..., suppliers: ..., web_scrape_data: ..., multi_credential: ..., credential: ..., db_name: ...}
   # grab-all callers only: grab_all_data: ODC_grab_all_data
+  # grab-all resume (0.13.8): grab_all_cycle: ODC_grab_all_cycle, grab_all_progress: ODC_grab_all_progress
 
 graph:
   client_id:

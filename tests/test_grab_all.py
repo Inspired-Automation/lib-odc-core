@@ -234,3 +234,73 @@ def test_save_binds_raw_apostrophes(mock_connect, tmp_path):
     bound = cursor.execute.call_args.args[1:]
     assert "O'Brien's" in bound
     assert not any(isinstance(v, str) and "''" in v for v in bound)
+
+
+# --- notify_requester (0.13.8) -------------------------------------------------
+
+_JOB = {"supplier": "Energia", "client_name": "Acme Ltd", "grab_all_start_date": None}
+_TABLES = {"grab_all_data": "ODC_grab_all_data"}
+
+
+@patch("odc_core.grab_all.graph_client.send_mail")
+@patch("odc_core.grab_all.count_saved", return_value=(12, 3))
+@patch("odc_core.grab_all.find_requester", return_value=("jo.bloggs@example.com", "Jo Bloggs"))
+def test_notify_requester_emails_the_toolkit_user(mock_find, mock_count, mock_send):
+    sent = grab_all.notify_requester(
+        {}, job=_JOB, job_id="145", process_id="cr-9", tables=_TABLES, dsn="DSN=X",
+    )
+    assert sent is True
+    mock_find.assert_called_once_with("cr-9", {}, "DSN=X")
+    args, kwargs = mock_send.call_args
+    assert args[1] == "jo.bloggs@example.com"
+    assert args[2] == "Energia Grab-all process completed"
+    assert "Hello Jo," in args[3]
+    assert "New bills saved: 12 across 3 account(s)" in args[3]
+    assert kwargs["sender_address"] == "noreply_automation@inspiredenergy.co.uk"
+
+
+@patch("odc_core.grab_all.graph_client.send_mail")
+@patch("odc_core.grab_all.find_requester", return_value=None)
+def test_notify_requester_skips_scheduled_runs(mock_find, mock_send):
+    assert grab_all.notify_requester(
+        {}, job=_JOB, job_id="1", process_id="cr-1", tables=_TABLES, dsn="d",
+    ) is False
+    mock_send.assert_not_called()
+
+
+@patch("odc_core.grab_all.graph_client.send_mail")
+@patch("odc_core.grab_all.find_requester")
+def test_notify_requester_can_be_turned_off(mock_find, mock_send):
+    for value in (False, "false", 0):
+        config = {"grab_all_notification": {"enabled": value}}
+        assert grab_all.notify_requester(
+            config, job=_JOB, job_id="1", process_id="cr-1", tables=_TABLES, dsn="d",
+        ) is False
+    mock_find.assert_not_called()
+    mock_send.assert_not_called()
+
+
+@patch("odc_core.grab_all.graph_client.send_mail", side_effect=RuntimeError("graph down"))
+@patch("odc_core.grab_all.count_saved", return_value=(0, 0))
+@patch("odc_core.grab_all.find_requester", return_value=("a@example.com", ""))
+def test_notify_requester_never_raises(mock_find, mock_count, mock_send):
+    assert grab_all.notify_requester(
+        {}, job=_JOB, job_id="1", process_id="cr-1", tables=_TABLES, dsn="d",
+    ) is False
+
+
+@patch("odc_core.db.pyodbc.connect")
+def test_find_requester_matches_control_room_job_id(mock_connect):
+    conn, cursor = _connect_mock(("jo@example.com ", "Jo Bloggs"))
+    mock_connect.return_value = conn
+    assert grab_all.find_requester(987, {}, "d") == ("jo@example.com", "Jo Bloggs")
+    sql, param = cursor.execute.call_args.args
+    assert "Titan_INSE.dbo.TOOLKIT_PORTAL_SCRAPE_ASSIST_RUN" in sql
+    assert "[control_room_job_id] = ?" in sql
+    assert param == "987"
+
+
+@patch("odc_core.db.pyodbc.connect")
+def test_find_requester_none_when_no_toolkit_run(mock_connect):
+    mock_connect.return_value = _connect_mock(None)[0]
+    assert grab_all.find_requester("cr-1", {}, "d") is None

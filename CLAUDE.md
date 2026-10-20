@@ -88,6 +88,10 @@ entry point of its own.
   since this library owns no migrations: 001-004 for `Titan_INSE_DEV`, 005
   for the live `Titan_INSE` (applied 2026-10-01, the schema confirmed
   identical to DEV straight after).
+- `grab_all.notify_requester()` (0.13.8) reads two inse-toolkit tables,
+  read-only: `Titan_INSE.dbo.TOOLKIT_PORTAL_SCRAPE_ASSIST_RUN` and
+  `TOOLKIT_USER`. They are owned by inse-toolkit, and live on `Titan_INSE`
+  even for DEV runs.
 - `sugar_client.py` (added 0.7.0) is the one module that talks to a second,
   unrelated database: SugarCRM itself (`DSN=Sugar Corp`, MySQL), read-only,
   looking up `accounts.NAME` by id. Not Titan, not Jupiter - a caller must
@@ -368,6 +372,34 @@ entry point of its own.
   entry.
 
 ## Change Log
+- 2026-10-20: v0.13.8 - PATCH (the developer's choice of number; the change
+  is additive). New `grab_all_progress` module so a grab-all job resumes
+  where the last run stopped. A cycle is one full pass over a login's
+  companies and accounts, keyed on supplier + client + login, because a new
+  `ODC_jobs` row is created daily for the same login. `open_cycle()` finds or
+  starts it (UPDLOCK/HOLDLOCK, plus a filtered unique index allowing one open
+  cycle per key), `Cycle.is_done()` skips `DONE`/`NO_ACCOUNTS`/
+  `NOT_AUTHORISED` and retries `FAILED`, `record()` upserts each result, and
+  `close_cycle()` ends the cycle when a run reaches the end of the list. New
+  tables `ODC_grab_all_cycle` / `ODC_grab_all_progress`; this library still
+  owns no DDL, so they are in automation-odc-electric-ireland
+  `migrations/001`-`003`, the first consumer (as `ODC_grab_all_data` is in
+  automation-odc-sse-airtricity). Why: Electric Ireland's session ends about
+  65 minutes after login, and both Horizon runs (2026-10-19, 10-20) died in a
+  198-account company after re-checking the same 13 companies.
+  Also in 0.13.8: `grab_all.notify_requester()` emails the inse-toolkit
+  user who started a grab-all run once it completes with no errors (the
+  developer's choices: success only; scheduled runs email nobody; can be
+  turned off with `grab_all_notification.enabled: false`). The user is
+  `TOOLKIT_PORTAL_SCRAPE_ASSIST_RUN.control_room_job_id = process_id`
+  joined to `TOOLKIT_USER.email` on `Titan_INSE`. Checked read-only on live
+  2026-10-20 against the three latest toolkit-started grab-all runs: each
+  resolved a user, the counts matched saved rows, and an unknown id returned
+  nobody. Wired into Energia, Electric Ireland and SSE Airtricity (SSE has
+  no toolkit-started runs yet, so it sends nothing today). 243 tests pass.
+  Released 2026-10-20. The resume tables were on `Titan_INSE_DEV` but not
+  live `Titan_INSE` at release (checked the same day); Electric Ireland runs
+  without resume on live until migration 003 is applied.
 - 2026-10-19: v0.13.7 - PATCH. New `login_failure` module so every supplier
   bot handles a failed login the same way: `handle_login_failure()` logs and
   either emails the client or raises the team alert through `errors.add()`
@@ -979,6 +1011,12 @@ entry point of its own.
   does not exist and made the documented `pip install` URLs 404).
 
 ## Outstanding TODOs
+- v0.13.8 released 2026-10-20. Apply automation-odc-electric-ireland
+  migration 003 to live `Titan_INSE` before adding the `grab_all_cycle`/
+  `grab_all_progress` keys to a live runner's `config.yaml`. Confirm the bot runners' service accounts can SELECT
+  `Titan_INSE.dbo.TOOLKIT_PORTAL_SCRAPE_ASSIST_RUN` and `TOOLKIT_USER`
+  (only checked with a developer account). Without it the completion email
+  logs "could not send the completion email" and nobody is told.
 - v0.13.7 released 2026-10-19. Mail.Send as
   `noreply_automation@inspiredenergy.co.uk` confirmed the same day (test
   sends accepted by Graph). Still to confirm: the bot runners can write to
