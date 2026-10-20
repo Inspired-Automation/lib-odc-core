@@ -79,10 +79,69 @@ def test_record_updates_existing_row(mock_connect):
 
     gp.record(cycle, "Horizon - NIDOF", "", gp.STATUS_DONE, job_id="4996", process_id=14993, tables=TABLES, dsn="Jupiter")
 
-    assert cursor.execute.call_count == 1
-    assert cursor.execute.call_args.args[0].strip().startswith("UPDATE ODC_grab_all_progress")
-    assert cursor.execute.call_args.args[1:] == ("DONE", 0, 4996, "14993", 7, "Horizon - NIDOF", "")
+    progress_update, touch = cursor.execute.call_args_list
+    assert progress_update.args[0].strip().startswith("UPDATE ODC_grab_all_progress")
+    assert progress_update.args[1:] == ("DONE", 0, 4996, "14993", 7, "Horizon - NIDOF", "")
+    assert "SET [process_id] = ?, [heartbeat_at_utc] = SYSUTCDATETIME()" in touch.args[0]
+    assert touch.args[1:] == ("14993", 7)
     assert cycle.is_done("Horizon - NIDOF")
+
+
+@patch("odc_core.db.pyodbc.connect")
+def test_open_cycle_with_process_id_writes_heartbeat(mock_connect):
+    conn, cursor = _connect_mock(fetchone=[(7, STARTED)])
+    mock_connect.return_value = conn
+
+    gp.open_cycle("Electric Ireland", "Horizon", "a@b.ie", "4996", TABLES, "Jupiter", process_id=14993)
+
+    touch = cursor.execute.call_args_list[-1]
+    assert "UPDATE ODC_grab_all_cycle" in touch.args[0] and "[heartbeat_at_utc]" in touch.args[0]
+    assert touch.args[1:] == ("14993", 7)
+
+
+@patch("odc_core.db.pyodbc.connect")
+def test_heartbeat_failure_is_swallowed_and_not_retried(mock_connect):
+    import pyodbc
+
+    conn, cursor = _connect_mock()
+    cursor.execute.side_effect = pyodbc.ProgrammingError("42S22", "Invalid column name 'heartbeat_at_utc'")
+    mock_connect.return_value = conn
+    cycle = _cycle()
+
+    assert gp.heartbeat(cycle, 14993, TABLES, "Jupiter") is False
+    assert cycle.heartbeat_ok is False
+    calls = cursor.execute.call_count
+    assert gp.heartbeat(cycle, 14993, TABLES, "Jupiter") is False
+    assert cursor.execute.call_count == calls  # skipped once it has failed
+
+
+def test_heartbeat_without_process_id_does_nothing():
+    assert gp.heartbeat(_cycle(), None, TABLES, "Jupiter") is False
+
+
+@patch("odc_core.db.pyodbc.connect")
+def test_claim_heartbeat_reads_open_cycle(mock_connect):
+    conn, cursor = _connect_mock(fetchone=[(7, " 14993 ", 2400)])
+    mock_connect.return_value = conn
+
+    beat = gp.claim_heartbeat(" Electric Ireland", "Horizon", "a@b.ie", TABLES, "Jupiter")
+
+    assert beat == gp.CycleHeartbeat(cycle_id=7, process_id="14993", age_s=2400)
+    sql = cursor.execute.call_args.args[0]
+    assert "DATEDIFF(SECOND, [heartbeat_at_utc], SYSUTCDATETIME())" in sql
+    assert "[completed_at_utc] IS NULL" in sql
+    assert cursor.execute.call_args.args[1:] == ("Electric Ireland", "Horizon", "a@b.ie")
+
+
+@patch("odc_core.db.pyodbc.connect")
+def test_claim_heartbeat_none_when_no_open_cycle_or_no_beat(mock_connect):
+    conn, _ = _connect_mock(fetchone=[None])
+    mock_connect.return_value = conn
+    assert gp.claim_heartbeat("S", "C", "L", TABLES, "Jupiter") is None
+
+    conn, _ = _connect_mock(fetchone=[(8, None, None)])
+    mock_connect.return_value = conn
+    assert gp.claim_heartbeat("S", "C", "L", TABLES, "Jupiter") == gp.CycleHeartbeat(8, None, None)
 
 
 @patch("odc_core.db.pyodbc.connect")

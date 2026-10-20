@@ -41,6 +41,8 @@ import logging
 from dataclasses import dataclass, field
 from datetime import datetime
 
+import pyodbc
+
 from . import db
 
 logger = logging.getLogger(__name__)
@@ -94,6 +96,25 @@ INSERT INTO {grab_all_progress}
 VALUES (?, ?, ?, ?, ?, ?, ?)
 """
 
+# Heartbeat (0.13.9, columns from migration 004/005): which run last worked
+# the cycle, and when. Lets a new run tell a live claim from a dead one.
+_TOUCH_CYCLE = """
+UPDATE {grab_all_cycle}
+SET [process_id] = ?, [heartbeat_at_utc] = SYSUTCDATETIME()
+WHERE [id] = ?
+"""
+
+# Age is worked out by the database, so the runner's clock does not matter.
+_SELECT_HEARTBEAT = """
+SELECT TOP 1 [id], [process_id], DATEDIFF(SECOND, [heartbeat_at_utc], SYSUTCDATETIME())
+FROM {grab_all_cycle}
+WHERE [supplier] = ?
+AND   [client_name] = ?
+AND   [login_username] = ?
+AND   [completed_at_utc] IS NULL
+ORDER BY [id] DESC
+"""
+
 _CLOSE_CYCLE = """
 UPDATE {grab_all_cycle}
 SET [completed_at_utc] = SYSUTCDATETIME(), [completed_job_id] = ?
@@ -121,6 +142,9 @@ class Cycle:
     started_at_utc: datetime | None
     resumed: bool
     statuses: dict[tuple[str, str], str] = field(default_factory=dict)
+    #: False once a heartbeat write has failed (e.g. migration 004/005 not
+    #: applied), so the warning is logged once and later beats are skipped.
+    heartbeat_ok: bool = True
 
     def status_of(self, company_name: str, account_reference: str = COMPANY_LEVEL) -> str | None:
         """The recorded status, or None if nothing is recorded yet."""
@@ -138,6 +162,68 @@ class Cycle:
         return totals
 
 
+@dataclass
+class CycleHeartbeat:
+    """Which run last worked the open cycle, and how long ago."""
+
+    cycle_id: int
+    process_id: str | None
+    age_s: int | None  # None when no heartbeat has been written yet
+
+
+def heartbeat(cycle: Cycle, process_id: str | int | None, tables: dict, dsn: str) -> bool:
+    """Stamp the cycle with this run's process_id and the time. Never raises.
+
+    ``record()`` and ``open_cycle()`` already do this; call it at other
+    points where a run can go a long time without recording anything.
+    """
+    if process_id is None or not cycle.heartbeat_ok:
+        return False
+    sql = _TOUCH_CYCLE.format(grab_all_cycle=tables["grab_all_cycle"])
+
+    def work(conn) -> None:
+        conn.cursor().execute(sql, str(process_id), cycle.id)
+        conn.commit()
+
+    try:
+        db.run(dsn, work, description=f"grab_all_progress.heartbeat({cycle.id})")
+    except pyodbc.Error:
+        cycle.heartbeat_ok = False
+        logger.warning(
+            "GRAB_ALL_PROGRESS - cycle %s heartbeat could not be written (migration 004/005 not applied?); "
+            "a run that dies now cannot be taken over automatically", cycle.id, exc_info=True,
+        )
+        return False
+    return True
+
+
+def claim_heartbeat(
+    supplier: str,
+    client_name: str,
+    login_username: str,
+    tables: dict,
+    dsn: str,
+) -> CycleHeartbeat | None:
+    """The open cycle's last heartbeat for supplier + client + login, or None if no cycle is open.
+
+    A caller deciding whether a claim on a grab-all job is stale compares
+    ``process_id`` with ``ODC_jobs.process_id`` and looks at ``age_s``. Read
+    without a lock: it only informs that decision.
+    """
+    sql = _SELECT_HEARTBEAT.format(grab_all_cycle=tables["grab_all_cycle"])
+
+    def work(conn) -> CycleHeartbeat | None:
+        row = conn.cursor().execute(
+            sql, _clean(supplier), _clean(client_name), _clean(login_username),
+        ).fetchone()
+        if row is None:
+            return None
+        process = None if row[1] is None or str(row[1]).strip() == "" else str(row[1]).strip()
+        return CycleHeartbeat(cycle_id=int(row[0]), process_id=process, age_s=None if row[2] is None else int(row[2]))
+
+    return db.run(dsn, work, description=f"grab_all_progress.claim_heartbeat({supplier}, {client_name})")
+
+
 def open_cycle(
     supplier: str,
     client_name: str,
@@ -145,8 +231,14 @@ def open_cycle(
     job_id: str | int,
     tables: dict,
     dsn: str,
+    *,
+    process_id: str | int | None = None,
 ) -> Cycle:
-    """Return the open cycle for supplier + client + login, starting one if there is none."""
+    """Return the open cycle for supplier + client + login, starting one if there is none.
+
+    With ``process_id`` (0.13.9) the cycle is also stamped with a heartbeat,
+    so another run can see this one is alive from the moment it claims.
+    """
     supplier, client_name, login_username = _clean(supplier), _clean(client_name), _clean(login_username)
     select_open = _SELECT_OPEN_CYCLE.format(grab_all_cycle=tables["grab_all_cycle"])
     insert_cycle = _INSERT_CYCLE.format(grab_all_cycle=tables["grab_all_cycle"])
@@ -174,6 +266,7 @@ def open_cycle(
     # Replaying is safe: a transient SQLSTATE means the insert was not
     # committed, and the select finds the cycle if it was.
     cycle = db.run(dsn, work, description=f"grab_all_progress.open_cycle({supplier}, {client_name})")
+    heartbeat(cycle, process_id, tables, dsn)
     logger.info(
         "GRAB_ALL_PROGRESS - %s cycle %s for %s / %s (started %s): %s",
         "resuming" if cycle.resumed else "starting",
@@ -223,6 +316,7 @@ def record(
     # Replaying is safe: update-then-insert lands on the same single row.
     db.run(dsn, work, description=f"grab_all_progress.record({company_name}, {account_reference or '(company)'})")
     cycle.statuses[_key(company_name, account_reference)] = status
+    heartbeat(cycle, process_id, tables, dsn)
     logger.debug(
         "GRAB_ALL_PROGRESS - cycle %s: %s / %s -> %s",
         cycle.id, company_name, account_reference or "(company)", status,

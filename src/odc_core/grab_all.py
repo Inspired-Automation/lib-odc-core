@@ -189,6 +189,51 @@ def claim_job(job_id: str, process_id: str, tables: dict, dsn: str) -> None:
     db.run(dsn, work, description=f"grab_all.claim_job({job_id})")
 
 
+_SELECT_CLAIM = "SELECT [process_id] FROM {jobs} WHERE [id] = ?"
+
+# Only clears the caller's own claim, so a run that stops never releases a
+# job another run has since taken over.
+_RELEASE_CLAIM = "UPDATE {jobs} SET [process_id] = NULL WHERE [id] = ? AND [process_id] = ?"
+
+
+def claimed_by(job_id: str, tables: dict, dsn: str) -> str | None:
+    """Return the process_id holding job_id, or None if it is unclaimed (or has no row)."""
+    sql = _SELECT_CLAIM.format(jobs=tables["jobs"])
+
+    def work(conn) -> str | None:
+        row = conn.cursor().execute(sql, job_id).fetchone()
+        if row is None or row[0] is None or str(row[0]).strip() == "":
+            return None
+        return str(row[0]).strip()
+
+    return db.run(dsn, work, description=f"grab_all.claimed_by({job_id})")
+
+
+def release_claim(job_id: str, process_id: str, tables: dict, dsn: str) -> bool:
+    """Clear ODC_jobs.process_id if `process_id` still holds the job. True if it was cleared.
+
+    For a grab-all run that stopped before its cycle finished: the job is
+    then unclaimed again (inse-toolkit lists only unclaimed jobs), so a
+    person can re-run it and the re-run resumes the cycle.
+    """
+    sql = _RELEASE_CLAIM.format(jobs=tables["jobs"])
+
+    def work(conn) -> bool:
+        cursor = conn.cursor()
+        cursor.execute(sql, job_id, str(process_id))
+        released = cursor.rowcount > 0
+        conn.commit()
+        return released
+
+    # Replaying is safe: the second attempt matches no row and changes nothing.
+    released = db.run(dsn, work, description=f"grab_all.release_claim({job_id})")
+    if released:
+        logger.info("GRAB_ALL - released claim %s on job %s", process_id, job_id)
+    else:
+        logger.info("GRAB_ALL - job %s is not held by %s; claim left as it is", job_id, process_id)
+    return released
+
+
 def is_duplicate(
     account_reference: str,
     supplier: str,

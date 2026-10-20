@@ -5,6 +5,15 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.13.9] - 2026-10-20
+### Added
+- A grab-all job that fails part way can be re-run.
+  - `grab_all.claimed_by(job_id, tables, dsn) -> str | None`: the process_id holding the job.
+  - `grab_all.release_claim(job_id, process_id, tables, dsn) -> bool`: clears `ODC_jobs.process_id` only if that process still holds it. For a run that stopped before its cycle finished: inse-toolkit lists only unclaimed jobs, so the job reappears there, and the re-run resumes the cycle.
+  - Cycle heartbeat: `ODC_grab_all_cycle.process_id` / `heartbeat_at_utc` (automation-odc-electric-ireland migrations 004/005). `open_cycle(..., process_id=...)` (new keyword) and `record()` stamp it; `heartbeat(cycle, process_id, tables, dsn)` stamps it at other quiet points. Never raises: if the columns are missing it warns once and stops trying.
+  - `claim_heartbeat(supplier, client_name, login_username, tables, dsn) -> CycleHeartbeat | None`: the open cycle's last process_id and age in seconds (worked out by the database). A caller can take over a claim that its holder stopped working long ago, and refuse when the cycle is closed (the job finished) or was last worked by someone else.
+- Why: a failed grab-all run left `process_id` set, so the job could not be started again from the toolkit or re-claimed by a scheduled run.
+
 ## [0.13.8] - 2026-10-20
 ### Added
 - `grab_all_progress` module: a grab-all job resumes where the last run stopped instead of starting again at the first company.

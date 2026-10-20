@@ -105,6 +105,9 @@ for detail in job_details:
   `Cycle.is_done()` says what to skip (`DONE`/`NO_ACCOUNTS`/`NOT_AUTHORISED`;
   `FAILED` is retried), `record()` writes each result as it happens, and
   `close_cycle()` ends the cycle once a run reaches the end of the list.
+  From 0.13.9 a cycle carries a heartbeat (`heartbeat()`, `claim_heartbeat()`),
+  and `grab_all.claimed_by()` / `release_claim()` let a run that stopped
+  early free its job for a re-run.
 - `duplicate_check.py` - `is_duplicate()`: has this invoice already been
   recorded? Standard suppliers check `ODC_scrape_data` directly; `client_name
   == "inspired plc"` and `"ignite"` accounts are also cross-checked against

@@ -478,6 +478,24 @@ close_cycle(cycle, job_id, tables, dsn) -> None
   automation-odc-electric-ireland `migrations/001`-`003`.
 - Progress is bookkeeping: a caller should log a failure here and carry on
   downloading without resume rather than stop the run.
+- 0.13.9, re-running a failed job:
+
+  ```python
+  heartbeat(cycle, process_id, tables, dsn) -> bool            # never raises
+  claim_heartbeat(supplier, client_name, login_username, tables, dsn) -> CycleHeartbeat | None
+  CycleHeartbeat(cycle_id: int, process_id: str | None, age_s: int | None)
+  grab_all.claimed_by(job_id, tables, dsn) -> str | None
+  grab_all.release_claim(job_id, process_id, tables, dsn) -> bool
+  ```
+
+  - `open_cycle(..., process_id=...)` and `record()` also write the heartbeat
+    (`ODC_grab_all_cycle.process_id`, `heartbeat_at_utc`). If the columns are
+    missing, the first failure is logged and the cycle stops trying.
+  - `claim_heartbeat()` reads the open cycle only, with no lock; `None`
+    means no cycle is open (the last one closed). The age is computed by the
+    database.
+  - `release_claim()` clears `ODC_jobs.process_id` only where it still equals
+    the caller's, so a run never releases a job another run has taken over.
 
 ### 3.4a `sugar_client` - SugarCRM account lookup
 

@@ -304,3 +304,32 @@ def test_find_requester_matches_control_room_job_id(mock_connect):
 def test_find_requester_none_when_no_toolkit_run(mock_connect):
     mock_connect.return_value = _connect_mock(None)[0]
     assert grab_all.find_requester("cr-1", {}, "d") is None
+
+
+@patch("odc_core.db.pyodbc.connect")
+def test_claimed_by_returns_holder_or_none(mock_connect):
+    conn, cursor = _connect_mock((" 14993 ",))
+    mock_connect.return_value = conn
+    assert grab_all.claimed_by("4996", TABLES, "Jupiter") == "14993"
+    assert cursor.execute.call_args.args[1:] == ("4996",)
+
+    for empty in (None, (None,), ("",)):
+        conn, _ = _connect_mock(empty)
+        mock_connect.return_value = conn
+        assert grab_all.claimed_by("4996", TABLES, "Jupiter") is None
+
+
+@patch("odc_core.db.pyodbc.connect")
+def test_release_claim_only_clears_own_claim(mock_connect):
+    conn, cursor = _connect_mock(None)
+    cursor.rowcount = 1
+    mock_connect.return_value = conn
+
+    assert grab_all.release_claim("4996", 14993, TABLES, "Jupiter") is True
+    sql = cursor.execute.call_args.args[0]
+    assert "SET [process_id] = NULL" in sql and "AND [process_id] = ?" in sql
+    assert cursor.execute.call_args.args[1:] == ("4996", "14993")
+    conn.commit.assert_called_once()
+
+    cursor.rowcount = 0
+    assert grab_all.release_claim("4996", 14993, TABLES, "Jupiter") is False

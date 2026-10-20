@@ -372,6 +372,18 @@ entry point of its own.
   entry.
 
 ## Change Log
+- 2026-10-20: v0.13.9 - PATCH. Re-running a failed grab-all job.
+  `grab_all.claimed_by()` and `grab_all.release_claim()` (clears
+  `process_id` only while the caller still holds it). Cycle heartbeat in
+  `grab_all_progress`: `ODC_grab_all_cycle.process_id`/`heartbeat_at_utc`
+  (automation-odc-electric-ireland migrations 004/005), stamped by
+  `open_cycle(..., process_id=)`, `record()` and `heartbeat()`, read by
+  `claim_heartbeat()` with the age from `SYSUTCDATETIME()`. A heartbeat write
+  never raises; without the columns it warns once per cycle. The policy
+  (release when a run stops early, take over after 30 minutes of no
+  heartbeat, never take over a finished cycle) is the caller's: see
+  automation-odc-electric-ireland `main._grab_all_claim_ok()`. 250 tests pass.
+  Not released.
 - 2026-10-20: v0.13.8 - PATCH (the developer's choice of number; the change
   is additive). New `grab_all_progress` module so a grab-all job resumes
   where the last run stopped. A cycle is one full pass over a login's
