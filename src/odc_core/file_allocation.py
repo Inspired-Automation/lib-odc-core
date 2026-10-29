@@ -12,6 +12,7 @@ lookup, the doc type and utility conventions, and the filenames.
 from __future__ import annotations
 
 import logging
+from pathlib import Path
 
 from file_allocation_core.routing import (
     TreeSpec,
@@ -19,6 +20,7 @@ from file_allocation_core.routing import (
     is_inspired_client,
     normalise_utility,
 )
+from file_allocation_core.unc import from_unc
 
 from . import sugar_client
 
@@ -117,6 +119,13 @@ def allocate(
     is the SugarCRM name (or the free-text `customer_name`, always the case
     for Ignite today), made safe for Windows.
 
+    A mapped drive in `client_location` (``X:\\POST RECEIVED``) is filed
+    through its UNC share (lib-file-allocation's ``to_unc``), but the paths
+    returned keep the drive letter they were given: `client_filepath` is
+    stored in ODC_scrape_data, and automation-odc-pdf-auto matches on its
+    ``O:\\ODC_Clients`` prefix. Every odc_core function that touches the file
+    translates it again.
+
     Returns a dict with keys:
         folder_location   - directory where the file will be saved
         complete_filename - filename without extension
@@ -158,6 +167,7 @@ def allocate(
             f"_{normalised_utility}_{invoice_number}_{bill_date_yyyymmdd}"
         )
 
+    folder = Path(from_unc(folder, client_location))
     client_filepath = folder / f"{filename}.{file_extension}"
 
     logger.debug(

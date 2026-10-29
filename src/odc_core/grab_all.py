@@ -41,6 +41,8 @@ import logging
 import shutil
 from pathlib import Path
 
+from file_allocation_core.unc import to_unc
+
 from . import db, file_allocation, graph_client
 from .jobstodo import _UPDATE_PROCESS_ID
 from .login_failure import DEFAULT_SENDER
@@ -338,8 +340,10 @@ def save(
     Same behaviour as ``file_save_as.save()`` (move, insert, VOID if under
     1 KB), with the grab-all table's column set and no job_details_id.
     Keyword-only, so the long argument list cannot be passed out of order.
-    Returns True on success.
+    Returns True on success. Paths go through ``to_unc()``, as there.
     """
+    staging_path = to_unc(staging_path)
+    target_path = to_unc(target_path)
     target = Path(target_path)
     target.parent.mkdir(parents=True, exist_ok=True)
 

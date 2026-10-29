@@ -77,6 +77,7 @@ from datetime import UTC, date, datetime
 from pathlib import Path
 
 import paramiko
+from file_allocation_core.unc import to_unc
 
 from . import db
 
@@ -155,7 +156,7 @@ def is_enabled_for(client_name: str | None, config: dict) -> bool:
 
 
 def sidecar_path(local_path: str | Path) -> Path:
-    path = Path(local_path)
+    path = Path(to_unc(local_path))
     return path.with_name(path.name + SIDECAR_SUFFIX)
 
 
@@ -522,7 +523,7 @@ class SftpSession:
         same size and deletes it then. Never raises. On False the copy stays
         in the staging folder for the next sweep.
         """
-        staged = Path(staged_path)
+        staged = Path(to_unc(staged_path))
         if not self.upload(staged, sidecar=False):
             return False
         try:
@@ -535,7 +536,7 @@ class SftpSession:
 
     def upload(self, local_path: str | Path, remote_name: str | None = None, *, sidecar: bool = True) -> bool:
         """Upload local_path, writing its sidecar unless sidecar=False. Returns True on success; never raises."""
-        local = Path(local_path)
+        local = Path(to_unc(local_path))
         name = remote_name or local.name
         if self.broken:
             return False
@@ -601,7 +602,7 @@ def staging_dir(client_name: str, supplier: str, config: dict) -> Path:
         raise ValueError(f"SFTP_UPLOAD - unknown env {env!r}; expected one of {sorted(_ENV_FOLDERS)}")
     if not (client_name or "").strip() or not (supplier or "").strip():
         raise ValueError("SFTP_UPLOAD - staging_dir needs a client name and a supplier")
-    base = (config.get("pdf_auto") or {}).get("base_path") or _DEFAULT_STAGING_BASE
+    base = to_unc((config.get("pdf_auto") or {}).get("base_path") or _DEFAULT_STAGING_BASE)
     return Path(base) / folder / STAGING_FOLDER / client_name.strip() / supplier.strip()
 
 
@@ -614,8 +615,8 @@ def stage(local_path: str | Path, staging: str | Path) -> Path:
     is replaced. Raises SftpStagingError (an OSError) if the copy is missing
     or truncated, and OSError if the folder cannot be reached.
     """
-    source = Path(local_path)
-    dest_dir = Path(staging)
+    source = Path(to_unc(local_path))
+    dest_dir = Path(to_unc(staging))
     dest_dir.mkdir(parents=True, exist_ok=True)
     dest = dest_dir / source.name
     part = dest.with_name(dest.name + PART_SUFFIX)
@@ -638,7 +639,7 @@ def staged_files(staging: str | Path) -> list[Path]:
     Skips ``.part`` files (a copy still being written). Raises OSError if
     the folder exists but cannot be listed.
     """
-    folder = Path(staging)
+    folder = Path(to_unc(staging))
     if not folder.is_dir():
         return []
     files = [p for p in folder.iterdir() if p.is_file() and not p.name.endswith(PART_SUFFIX)]

@@ -6,6 +6,8 @@ import logging
 import shutil
 from pathlib import Path
 
+from file_allocation_core.unc import to_unc
+
 from . import db
 
 logger = logging.getLogger(__name__)
@@ -63,7 +65,12 @@ def save(
     Move the downloaded file from staging_path to target_path, insert a record
     into ODC_scrape_data, and mark the record VOID if the file is < 1 KB.
     Returns True on success.
+
+    Both paths go through ``to_unc()``, so a mapped drive (``X:\\...``)
+    works on a runner without it. ``client_filepath`` is recorded as given.
     """
+    staging_path = to_unc(staging_path)
+    target_path = to_unc(target_path)
     target = Path(target_path)
     target.parent.mkdir(parents=True, exist_ok=True)
 

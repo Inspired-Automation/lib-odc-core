@@ -56,6 +56,7 @@ from pathlib import Path
 from typing import Any
 
 from file_allocation_core.routing import is_inspired_client
+from file_allocation_core.unc import to_unc
 
 from . import graph_client
 
@@ -204,10 +205,10 @@ def notices_dir(config: dict) -> Path:
     """Folder holding one marker file per supplier+login last emailed."""
     settings = _settings(config)
     if settings.get("state_dir"):
-        return Path(settings["state_dir"])
+        return Path(to_unc(settings["state_dir"]))
     env = str(config.get("env") or "dev").lower()
     folder = _ENV_FOLDERS.get(env, "DEV")
-    base = (config.get("pdf_auto") or {}).get("base_path") or _DEFAULT_BASE
+    base = to_unc((config.get("pdf_auto") or {}).get("base_path") or _DEFAULT_BASE)
     return Path(base) / folder / NOTICES_FOLDER
 
 

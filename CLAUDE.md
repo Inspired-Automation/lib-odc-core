@@ -203,6 +203,11 @@ entry point of its own.
   real DEV table was created, and `file_save_as` is unchanged.
 
 ## Known Gotchas
+- **Drive letters are translated, not trusted (0.13.10).** Every function
+  here that touches a file passes its path through
+  `file_allocation_core.unc.to_unc()`. A share that moves, or a new drive
+  letter, is changed in lib-file-allocation's `unc.DRIVE_MAP`, not here.
+  Paths recorded in the database keep the drive letter the caller gave.
 - **0.13.3 needs `ODC_jobs.human_in_loop` on the target database.** Both
   `get_job_details()` and `grab_all.get_job()` select it, so a bot pinned
   to 0.13.3 against a database without migration `sql/11` fails every job
@@ -372,6 +377,18 @@ entry point of its own.
   entry.
 
 ## Change Log
+- 2026-10-29: v0.13.10 - PATCH. Paths handed to the filing steps (the
+  ported AA `FILE_ALLOCATION`/`FILE_SAVE_AS` subtasks) and to PDF Auto,
+  SFTP staging and login-failure notices are translated from a mapped drive
+  letter to its UNC share before the file system is touched, using
+  `file_allocation_core.unc.to_unc()` (lib-file-allocation 0.1.3, which
+  applies it in `destination_folder` too). The map is the office `net use`
+  list: E, I, L, M, O, Q, R, S, T, U, V, W, X, Y. `allocate()` still
+  returns the drive-letter form (`unc.from_unc`), so
+  `ODC_scrape_data.client_file_path` is unchanged and pdf-auto's
+  `O:\ODC_Clients` REPLACE keeps matching. 255 tests pass against the
+  lib-file-allocation source tree. Not released: needs lib-file-allocation
+  v0.1.3 released first, since the pin points at its wheel.
 - 2026-10-20: v0.13.9 - PATCH. Re-running a failed grab-all job.
   `grab_all.claimed_by()` and `grab_all.release_claim()` (clears
   `process_id` only while the caller still holds it). Cycle heartbeat in

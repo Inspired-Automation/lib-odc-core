@@ -6,6 +6,8 @@ import logging
 import shutil
 from pathlib import Path
 
+from file_allocation_core.unc import to_unc
+
 logger = logging.getLogger(__name__)
 
 # UNC form of I:\BPI\... - Control Room run nodes' service accounts do not
@@ -30,6 +32,7 @@ def copy(source_filepath: str, client_name: str, config: dict) -> Path:
       {base}/{LIVE|DEV}/PDFAuto/{client_name}/{same filename}
 
     *base* defaults to the I: drive's UNC path; override via config['pdf_auto']['base_path'].
+    A mapped drive in either path is translated to its UNC share (``to_unc``).
     The LIVE/DEV folder comes from config['env']: "prod" or "live" -> LIVE,
     "dev" (the default) -> DEV. Any other value raises ValueError.
 
@@ -42,7 +45,8 @@ def copy(source_filepath: str, client_name: str, config: dict) -> Path:
         raise ValueError(
             f"PDF_AUTO_COPY - unknown env {env!r}; expected one of {sorted(_ENV_FOLDERS)}"
         )
-    base = (config.get("pdf_auto") or {}).get("base_path") or _DEFAULT_BASE
+    base = to_unc((config.get("pdf_auto") or {}).get("base_path") or _DEFAULT_BASE)
+    source_filepath = to_unc(source_filepath)
     dest_dir = Path(base) / folder / "PDFAuto" / client_name
     dest_dir.mkdir(parents=True, exist_ok=True)
     dest = dest_dir / Path(source_filepath).name

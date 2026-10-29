@@ -5,6 +5,16 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.13.10] - 2026-10-29
+### Changed
+- Mapped drive letters are translated to their UNC share before any file is touched, so a runner whose service account has no drive letters mapped (or maps them to other storage) still files to the right place. The map is `file_allocation_core.unc.DRIVE_MAP` (lib-file-allocation 0.1.3, now the pinned dependency): E, I, L, M, O, Q, R, S, T, U, V, W, X, Y.
+  - `file_allocation.allocate()` / `grab_all.allocate()`: `client_location` (`X:\POST RECEIVED`) is filed through the share. The returned `folder_location` / `client_filepath` keep the drive letter they were given, because `client_filepath` is stored in `ODC_scrape_data.client_file_path` and automation-odc-pdf-auto matches on its `O:\ODC_Clients` prefix.
+  - `file_save_as.save()`, `grab_all.save()`: `staging_path` and `target_path`.
+  - `pdf_auto_copy.copy()`: the source and `pdf_auto.base_path`.
+  - `sftp_upload`: `staging_dir()`'s base, `stage()`, `staged_files()`, `SftpSession.upload()` / `upload_staged()`, `sidecar_path()` / `is_uploaded()`.
+  - `login_failure.notices_dir()`: `state_dir` and `pdf_auto.base_path`.
+- No signature changed; a caller passing UNC or local (`C:`) paths sees no difference.
+
 ## [0.13.9] - 2026-10-20
 ### Added
 - A grab-all job that fails part way can be re-run.
