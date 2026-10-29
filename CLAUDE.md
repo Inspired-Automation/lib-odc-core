@@ -387,8 +387,9 @@ entry point of its own.
   returns the drive-letter form (`unc.from_unc`), so
   `ODC_scrape_data.client_file_path` is unchanged and pdf-auto's
   `O:\ODC_Clients` REPLACE keeps matching. 255 tests pass against the
-  lib-file-allocation source tree. Not released: needs lib-file-allocation
-  v0.1.3 released first, since the pin points at its wheel.
+  lib-file-allocation source tree. Released 2026-10-29, after
+  lib-file-allocation v0.1.3; both wheel URLs install and the suite passes
+  against the released 0.1.3. Supplier bots pick it up when re-pinned.
 - 2026-10-20: v0.13.9 - PATCH. Re-running a failed grab-all job.
   `grab_all.claimed_by()` and `grab_all.release_claim()` (clears
   `process_id` only while the caller still holds it). Cycle heartbeat in
