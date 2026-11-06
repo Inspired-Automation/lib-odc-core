@@ -571,7 +571,7 @@ retried. Raises `TimeoutError` when `timeout_s` elapses with no code. A message
 that matches the subject but contains no digit group is skipped rather than
 accepted, so polling continues.
 
-### 3.7a `login_failure` - uniform login-failure handling (0.13.7)
+### 3.7a `login_failure` - uniform login-failure handling (0.13.7; SystemsLink recipient 0.13.11)
 
 ```python
 class LoginFailureKind(StrEnum):
@@ -589,20 +589,52 @@ Every supplier bot's `main.py` reports a failed login through
 `handle_login_failure()`, passing the supplier's `_login_failure_detail` and
 `_login_failure_kind`. It logs one ERROR line, calls
 `errors.add("<supplier> login failed for job <id> (<kind>): <detail>")`
-unless `team_alert=False`, and emails the client (returns True) when all of:
-the kind is one of the three credential kinds; `client_name` is not an
-Inspired-process client (Inspired PLC, Ignite); the username (from `row`, or
-the `username` override) is an email address; `config["env"]` is prod (a dev
-run sends to `login_failure_notification.dev_recipient` if set, else nothing);
-and no marker for the same supplier+login is younger than `cooldown_hours`.
-Never raises. The email is plain text from
-`noreply_automation@inspiredenergy.co.uk`, Reply-To
-`support@systems-link.com`, and never includes the password.
+unless `team_alert=False` or SystemsLink is notified, and emails SystemsLink
+(`login_failure_notification.recipient`, default `support@systems-link.com`,
+who contact the client; returns True) when all of: the kind is one of the
+three credential kinds; `client_name` is not an Inspired-process client
+(Inspired PLC, Ignite); `config["env"]` is prod (a dev run sends to
+`login_failure_notification.dev_recipient` if set, else nothing); and no
+marker for the same supplier+login is younger than `cooldown_hours`. Never
+raises. The email is plain text from `noreply_automation@inspiredenergy.co.uk`
+(no Reply-To unless `reply_to` is set), names the client, supplier, login
+(from `row`, or the `username` override), portal and ODC job, and never
+includes the password. Before 0.13.11 it went to the client's login address,
+and only when that was an email address.
 
 Suppliers set `_login_failure_kind` from `classify_portal_message()` on text
 the portal displayed on its login page, combined across retries with
 `escalate()`, or explicitly from a dedicated check (an invalid-credentials
 banner, a forced password-change page). Never from exception text.
+
+### 3.7b `password_change` - forced password-change detection (0.13.11)
+
+```python
+detect_password_change(page, *, extra_selectors=(), extra_url_patterns=()) -> str | None
+wait_for_password_change(page, *, done=None, timeout_s=10.0,
+                         extra_selectors=(), extra_url_patterns=()) -> str | None
+url_signal(url, extra_url_patterns=()) -> str | None
+form_signal(count: int, desc: str, text: str) -> str | None
+message_signal(count: int, text: str) -> str | None
+```
+
+Returns a short reason when any signal fires, else None; never raises.
+Signals, checked on the page and every frame: (1) the URL path or fragment
+(not the query string) names a password change and is not a forgot-password
+route; (2) two or more visible `input[type=password]` and either an
+old/current plus a new/confirm password, or "new password", in the fields'
+name/id/placeholder/aria-label/autocomplete/label or the visible text;
+(3) a `login_failure.password_change_phrase()` match in the visible text on a
+page that does not have exactly one password field; (4) any
+`extra_selectors` visible or `extra_url_patterns` matching. A bare "Change
+Password" link or heading is never a signal.
+
+Supplier bots call it only during login, after their own logged-in check
+fails: `wait_for_password_change(page, done=<logged-in check>)` after each
+submit, `detect_password_change(page)` at the start of each retry and before
+giving up. On a hit they set `_login_failure_kind` to
+`PASSWORD_CHANGE_REQUIRED`, put the reason in `_login_failure_detail`, take a
+screenshot and stop retrying.
 
 ### 3.8 `validate_username`
 
@@ -901,7 +933,8 @@ src/odc_core/
 ├── updatejobdetails.py    # spODC_job_details_UpdateStatus wrapper
 ├── sugar_client.py        # SugarCRM account name lookup by internal id
 ├── graph_client.py        # Graph send_mail + read_otp_code
-├── login_failure.py       # uniform login-failure log/team alert/client email
+├── login_failure.py       # uniform login-failure log/team alert/SystemsLink email
+├── password_change.py     # forced password-change page detection during login
 ├── validate_username.py   # portal username sanity check
 ├── pdf_auto_copy.py       # copy into the PDF Auto drop folder
 └── browser_helpers.py     # human pacing, screenshots, cookie banners

@@ -377,6 +377,28 @@ entry point of its own.
   entry.
 
 ## Change Log
+- 2026-11-06: v0.13.11 - PATCH (behaviour change, no breaking signature for
+  `handle_login_failure()`). Login-failure notices go to SystemsLink
+  (`support@systems-link.com`, configurable as
+  `login_failure_notification.recipient`), who contact the client, instead of
+  to the client's portal login address. Rules otherwise unchanged
+  (credential kinds only, never Inspired PLC or Ignite, prod only, once per
+  supplier+login per 24h, no team alert once notified), except that the
+  login no longer has to be an email address. `reply_to` now defaults to
+  none. The email names client, supplier, login, portal and ODC job, with a
+  per-kind action. `build_client_email()` gains `client_name`/`job_id` and
+  drops `reply_to`; no supplier bot calls it directly. Prompted by TGP
+  Mygateway job 5448 (Control Room 21090) hitting a forced password change.
+  Same release adds the `password_change` module: `detect_password_change()`
+  / `wait_for_password_change()` give every supplier bot one check for a
+  forced password-change page (URL route, old/new or new/confirm password
+  form, or a "must change your password" message on a page that is not the
+  one-password-field sign-in form; never a bare "Change Password" link, which
+  logged-in navs have). TGP Mygateway's own URL-only check missed job 5448
+  because the SPA routed after `networkidle`; the wait helper polls for that.
+  Bots wire it into login() and stop retrying when it fires (retyping
+  credentials on that page risks a lockout). Tests drive mock pages in
+  headless Chromium and skip when Playwright/Chromium is absent.
 - 2026-10-29: v0.13.10 - PATCH. Paths handed to the filing steps (the
   ported AA `FILE_ALLOCATION`/`FILE_SAVE_AS` subtasks) and to PDF Auto,
   SFTP staging and login-failure notices are translated from a mapped drive

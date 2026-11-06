@@ -4,7 +4,8 @@ odc_core - shared infrastructure for ODC (Online Data Collection) supplier bots.
 Every supplier project (automation-odc-wave, automation-odc-british-gas, ...)
 depends on this package instead of re-implementing job claiming, file
 allocation/save, job-status updates, Microsoft Graph mail/OTP reading, or
-login-failure handling (login_failure, 0.13.7), or grab-all resume
+login-failure handling (login_failure, 0.13.7), forced password-change
+detection (password_change, 0.13.11), or grab-all resume
 (grab_all_progress, 0.13.8).
 
 Status vocabulary returned by a supplier's own search()/scrape function and
@@ -25,6 +26,7 @@ from . import (
     human_in_loop,
     jobstodo,
     login_failure,
+    password_change,
     pdf_auto_copy,
     sftp_upload,
     sugar_client,
@@ -32,7 +34,7 @@ from . import (
     validate_username,
 )
 
-__version__ = "0.13.10"
+__version__ = "0.13.11"
 
 __all__ = [
     "browser_helpers",
@@ -46,6 +48,7 @@ __all__ = [
     "human_in_loop",
     "jobstodo",
     "login_failure",
+    "password_change",
     "pdf_auto_copy",
     "sftp_upload",
     "sugar_client",

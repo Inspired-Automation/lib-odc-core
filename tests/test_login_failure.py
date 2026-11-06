@@ -60,11 +60,20 @@ def test_escalate_keeps_most_specific():
 
 # --- client_notice_recipient ------------------------------------------------
 
-def test_recipient_prod_non_inspired_credential_failure(tmp_path):
+@pytest.mark.parametrize("kind", [K.CREDENTIALS_REJECTED, K.ACCOUNT_LOCKED, K.PASSWORD_CHANGE_REQUIRED])
+def test_recipient_prod_non_inspired_is_systemslink(tmp_path, kind):
     recipient, _ = login_failure.client_notice_recipient(
-        _config(tmp_path), client_name="Acme Ltd", username=" billing@acme.co.uk ", kind=K.CREDENTIALS_REJECTED,
+        _config(tmp_path), client_name="Acme Ltd", username=" billing@acme.co.uk ", kind=kind,
     )
-    assert recipient == "billing@acme.co.uk"
+    assert recipient == "support@systems-link.com"
+
+
+def test_recipient_override_from_config(tmp_path):
+    recipient, _ = login_failure.client_notice_recipient(
+        _config(tmp_path, recipient="other@systems-link.com"),
+        client_name="Acme Ltd", username="billing@acme.co.uk", kind=K.PASSWORD_CHANGE_REQUIRED,
+    )
+    assert recipient == "other@systems-link.com"
 
 
 @pytest.mark.parametrize("client", ["Inspired PLC", "inspired plc", "IGNITE", " Ignite "])
@@ -83,12 +92,19 @@ def test_no_recipient_for_other_kind(tmp_path):
     assert recipient is None
 
 
-def test_no_recipient_when_username_not_email(tmp_path):
-    recipient, reason = login_failure.client_notice_recipient(
+def test_recipient_when_username_not_email(tmp_path):
+    recipient, _ = login_failure.client_notice_recipient(
         _config(tmp_path), client_name="Acme", username="ACME001", kind=K.CREDENTIALS_REJECTED,
     )
+    assert recipient == "support@systems-link.com"
+
+
+def test_no_recipient_without_client_name(tmp_path):
+    recipient, reason = login_failure.client_notice_recipient(
+        _config(tmp_path), client_name=" ", username="a@b.com", kind=K.CREDENTIALS_REJECTED,
+    )
     assert recipient is None
-    assert "not an email" in reason
+    assert "client_name" in reason
 
 
 def test_no_recipient_when_disabled(tmp_path):
@@ -124,24 +140,36 @@ def test_notices_dir_defaults_under_pdf_auto_base():
 
 # --- build_client_email -------------------------------------------------------
 
-def test_email_body_has_no_password_and_reply_to():
+def test_email_names_client_login_and_job_without_password():
     subject, body = login_failure.build_client_email(
         supplier_name="EDF Energy", username="billing@acme.co.uk",
         portal_url="https://edf/login", kind=K.CREDENTIALS_REJECTED,
-        when=datetime(2026, 10, 19),
+        when=datetime(2026, 10, 19), client_name="Acme Ltd", job_id=5448,
     )
-    assert subject == "Action required: we were unable to sign in to your EDF Energy online account"
-    assert "billing@acme.co.uk" in body
+    assert subject == "Action required: Acme Ltd - EDF Energy portal login needs updating (credentials rejected)"
+    assert "Client: Acme Ltd" in body
+    assert "Account login: billing@acme.co.uk" in body
+    assert "ODC job: 5448" in body
+    assert "https://edf/login" in body
     assert "19/10/2026" in body
-    assert "support@systems-link.com" in body
     assert "Kind regards" not in body
     assert "s3cret" not in body
+
+
+def test_email_password_change_asks_for_new_password():
+    subject, body = login_failure.build_client_email(
+        supplier_name="TGP Mygateway", username="bills@acme.com", portal_url=None,
+        kind=K.PASSWORD_CHANGE_REQUIRED, client_name="Acme Ltd", job_id=1,
+    )
+    assert "(password change required)" in subject
+    assert "asking for the password on this login to be changed" in body
+    assert "set a new password" in body
 
 
 # --- notify_client / handle_login_failure -------------------------------------
 
 @patch("odc_core.login_failure.graph_client.send_mail")
-def test_handle_emails_client_without_team_alert(mock_send, tmp_path):
+def test_handle_emails_systemslink_without_team_alert(mock_send, tmp_path):
     errors = MagicMock()
     sent = login_failure.handle_login_failure(
         errors, _config(tmp_path), supplier_name="EDF Energy", job_id=42,
@@ -150,9 +178,12 @@ def test_handle_emails_client_without_team_alert(mock_send, tmp_path):
     assert sent is True
     errors.add.assert_not_called()
     args, kwargs = mock_send.call_args
-    assert args[1] == "billing@acme.co.uk"
-    assert kwargs["reply_to"] == "support@systems-link.com"
+    assert args[1] == "support@systems-link.com"
+    assert kwargs["reply_to"] is None
     assert kwargs["sender_address"] == "noreply_automation@inspiredenergy.co.uk"
+    assert "Acme Ltd" in args[2]
+    assert "billing@acme.co.uk" in args[3]
+    assert "ODC job: 42" in args[3]
     assert "s3cret" not in args[3]
     markers = list(tmp_path.glob("*.json"))
     assert len(markers) == 1
@@ -173,15 +204,40 @@ def test_handle_inspired_client_team_alert_only(mock_send, tmp_path):
 
 
 @patch("odc_core.login_failure.graph_client.send_mail")
-def test_handle_non_email_login_team_alert_only(mock_send, tmp_path):
+def test_handle_non_email_login_still_notifies_systemslink(mock_send, tmp_path):
     errors = MagicMock()
     sent = login_failure.handle_login_failure(
         errors, _config(tmp_path), supplier_name="Wave", job_id=1,
         row={**ROW, "username": "acme123"}, detail="Invalid password", kind=K.CREDENTIALS_REJECTED,
     )
-    assert sent is False
-    errors.add.assert_called_once()
-    mock_send.assert_not_called()
+    assert sent is True
+    errors.add.assert_not_called()
+    assert mock_send.call_args.args[1] == "support@systems-link.com"
+    assert "Account login: acme123" in mock_send.call_args.args[3]
+
+
+@patch("odc_core.login_failure.graph_client.send_mail")
+def test_handle_password_change_notifies_systemslink(mock_send, tmp_path):
+    errors = MagicMock()
+    sent = login_failure.handle_login_failure(
+        errors, _config(tmp_path), supplier_name="TGP Mygateway", job_id=5448,
+        row={**ROW, "client_name": "ESOS Energy Ltd"}, detail="Change Password page",
+        kind=K.PASSWORD_CHANGE_REQUIRED,
+    )
+    assert sent is True
+    errors.add.assert_not_called()
+    args, _ = mock_send.call_args
+    assert args[1] == "support@systems-link.com"
+    assert "ESOS Energy Ltd - TGP Mygateway" in args[2]
+
+
+@patch("odc_core.login_failure.graph_client.send_mail")
+def test_reply_to_set_when_configured(mock_send, tmp_path):
+    login_failure.handle_login_failure(
+        MagicMock(), _config(tmp_path, reply_to="team@inspiredenergy.co.uk"),
+        supplier_name="SSE", job_id=1, row=ROW, detail="x", kind=K.ACCOUNT_LOCKED,
+    )
+    assert mock_send.call_args.kwargs["reply_to"] == "team@inspiredenergy.co.uk"
 
 
 @patch("odc_core.login_failure.graph_client.send_mail")
@@ -241,7 +297,7 @@ def test_handle_never_raises_on_send_failure(mock_send, tmp_path):
     assert sent is False
     assert errors.add.call_count == 2
     assert "login failed for job 1" in errors.add.call_args_list[0].args[0]
-    assert "email to the client failed" in errors.add.call_args_list[1].args[0]
+    assert "notice to SystemsLink failed" in errors.add.call_args_list[1].args[0]
     assert not list(tmp_path.glob("*.json"))
 
 
@@ -253,11 +309,12 @@ def test_handle_overrides_for_multi_credential(mock_send, tmp_path):
         row={**ROW, "username": "multi_credential"}, username="cred2@acme.co.uk",
         detail="bad", kind=K.CREDENTIALS_REJECTED,
     )
-    assert mock_send.call_args.args[1] == "cred2@acme.co.uk"
+    assert mock_send.call_args.args[1] == "support@systems-link.com"
+    assert "Account login: cred2@acme.co.uk" in mock_send.call_args.args[3]
 
 
 @patch("odc_core.login_failure.graph_client.send_mail")
-def test_team_alert_false_still_emails_client(mock_send, tmp_path):
+def test_team_alert_false_still_emails_systemslink(mock_send, tmp_path):
     errors = MagicMock()
     sent = login_failure.handle_login_failure(
         errors, _config(tmp_path), supplier_name="SFB", job_id=3, row=ROW,

@@ -5,6 +5,24 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.13.11] - 2026-11-06
+### Added
+- `password_change` module: one check every supplier bot calls during login to spot a forced password-change page, so it is reported as `PASSWORD_CHANGE_REQUIRED` (and SystemsLink is told) instead of a generic failure.
+  - `detect_password_change(page, extra_selectors=(), extra_url_patterns=()) -> str | None`: a reason when the URL path/fragment names a password change, the page (or any frame) has a password-change form (two or more visible password fields with old/current + new/confirm, or "new password"), or its visible text says the password must be changed (ignored on a page with exactly one password field, i.e. the sign-in form). A bare "Change Password" link or heading never counts. Never raises.
+  - `wait_for_password_change(page, done=..., timeout_s=10)`: polls after a submit, for single-page apps that route after `networkidle`; stops early when the bot's own logged-in check `done()` is true.
+  - Call only during login, after the bot's logged-in check failed.
+- `login_failure.password_change_phrase(text)`: the matching password-change phrase, or None.
+### Changed
+- `classify_portal_message()` also maps "password must / needs to be changed|reset|updated" and "set / create / choose a new password" to `PASSWORD_CHANGE_REQUIRED`.
+- `login_failure`: login-failure notices now go to SystemsLink (`support@systems-link.com`), who contact the client, instead of to the client's portal login address. Same rules otherwise: credential kinds only (rejected / locked / password change required), never Inspired PLC or Ignite, prod only (dev: `dev_recipient` or nothing), at most once per supplier+login per `cooldown_hours`, and no team alert once SystemsLink is notified.
+  - The login username no longer has to be an email address; a non-email login is notified too.
+  - New optional config key `login_failure_notification.recipient` (default `support@systems-link.com`).
+  - `reply_to` now defaults to none (it was `support@systems-link.com`, which is now the recipient).
+  - The email names the client, supplier, login, portal and ODC job, and says what to ask the client to do for each kind. Never the password.
+  - `build_client_email()` gains `client_name` and `job_id` keywords and drops `reply_to`. `DEFAULT_REPLY_TO` is replaced by `DEFAULT_RECIPIENT`.
+  - The team error raised when the notice email fails now reads "login-failure notice to SystemsLink failed".
+- Why: a forced password change on TGP Mygateway (ODC job 5448, Control Room job 21090) needed SystemsLink to get the client to update the password.
+
 ## [0.13.10] - 2026-10-29
 ### Changed
 - Mapped drive letters are translated to their UNC share before any file is touched, so a runner whose service account has no drive letters mapped (or maps them to other storage) still files to the right place. The map is `file_allocation_core.unc.DRIVE_MAP` (lib-file-allocation 0.1.3, now the pinned dependency): E, I, L, M, O, Q, R, S, T, U, V, W, X, Y.
