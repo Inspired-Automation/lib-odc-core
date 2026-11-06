@@ -87,11 +87,16 @@ def human_type(page, selector: str, text: str, config: dict) -> None:
     page.type(selector, text, delay=delay_ms)
 
 
-def take_error_screenshot(page, label: str, config: dict) -> None:
+def take_error_screenshot(page, label: str, config: dict) -> Path | None:
     """
     Capture a full-page screenshot on a portal error and save it to the
     supplier's logs directory. Failure to screenshot is swallowed so it
     never interrupts the main process.
+
+    Returns the saved file's path, or None if no screenshot was taken
+    (0.13.12; earlier versions returned None always). Pass it to
+    ``login_failure.handle_login_failure(screenshot=...)`` to attach it to
+    the SystemsLink notice.
     """
     try:
         logs_dir = Path(config.get("_logs_dir", "."))
@@ -102,8 +107,10 @@ def take_error_screenshot(page, label: str, config: dict) -> None:
         path = logs_dir / f"{process_id}_{supplier}_{label}_{ts}.png"
         page.screenshot(path=str(path), full_page=True)
         logger.debug("BROWSER_HELPERS - error screenshot saved: %s", path)
+        return path
     except Exception:
         logger.debug("BROWSER_HELPERS - could not capture error screenshot", exc_info=True)
+        return None
 
 
 def dismiss_cookie_banner(page) -> bool:

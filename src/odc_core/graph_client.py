@@ -9,17 +9,56 @@ Never hardcode these values in source. ``sender_address`` is only used by
 
 from __future__ import annotations
 
+import base64
 import html
 import logging
+import mimetypes
 import re
 import time
+from collections.abc import Iterable
 from datetime import datetime, timezone
+from pathlib import Path
 from urllib.parse import quote
 
 import msal
 import requests
 
 logger = logging.getLogger(__name__)
+
+#: Graph's sendMail takes attachments inline only up to about 3 MB per
+#: request (larger needs an upload session), so bigger files are skipped.
+MAX_ATTACHMENT_BYTES = 3 * 1024 * 1024
+
+
+def _file_attachments(paths: Iterable[str | Path] | None) -> list[dict]:
+    """Graph fileAttachment dicts for the readable files in *paths*, within
+    MAX_ATTACHMENT_BYTES in total. Files that cannot be attached are logged
+    and skipped, so a bad attachment never stops the email itself."""
+    attachments: list[dict] = []
+    total = 0
+    for raw in paths or ():
+        if not raw:
+            continue
+        path = Path(raw)
+        try:
+            data = path.read_bytes()
+        except OSError:
+            logger.warning("GRAPH_CLIENT - attachment not readable, sending without it: %s", path)
+            continue
+        if total + len(data) > MAX_ATTACHMENT_BYTES:
+            logger.warning(
+                "GRAPH_CLIENT - attachment %s (%d bytes) would exceed %d bytes, sending without it",
+                path, len(data), MAX_ATTACHMENT_BYTES,
+            )
+            continue
+        total += len(data)
+        attachments.append({
+            "@odata.type": "#microsoft.graph.fileAttachment",
+            "name": path.name,
+            "contentType": mimetypes.guess_type(path.name)[0] or "application/octet-stream",
+            "contentBytes": base64.b64encode(data).decode("ascii"),
+        })
+    return attachments
 
 
 def _acquire_token(config: dict) -> str:
@@ -55,18 +94,23 @@ def send_mail(
     *,
     reply_to: str | None = None,
     sender_address: str | None = None,
+    attachments: Iterable[str | Path] | None = None,
 ) -> None:
     """Send a plain-text email via Microsoft Graph.
 
     Sends as *sender_address* when given (the Graph app needs Mail.Send on
     that mailbox), else as config['graph']['sender_address']. *reply_to*
-    sets the message's Reply-To.
+    sets the message's Reply-To. *attachments* (0.13.12) are local files
+    sent as file attachments; one that is missing, unreadable or bigger
+    than ``MAX_ATTACHMENT_BYTES`` is skipped with a warning rather than
+    failing the send.
     """
     graph_config = config.get("graph", {})
     sender_address = sender_address or graph_config.get("sender_address")
     if not sender_address:
         raise ValueError("GRAPH_CLIENT - config['graph']['sender_address'] is required")
 
+    files = _file_attachments(attachments)
     token = _acquire_token(config)
     url = f"https://graph.microsoft.com/v1.0/users/{sender_address}/sendMail"
     payload = {
@@ -78,6 +122,8 @@ def send_mail(
     }
     if reply_to:
         payload["message"]["replyTo"] = [{"emailAddress": {"address": reply_to}}]
+    if files:
+        payload["message"]["attachments"] = files
     headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
     response = requests.post(url, headers=headers, json=payload, timeout=30)
     if response.status_code >= 300:

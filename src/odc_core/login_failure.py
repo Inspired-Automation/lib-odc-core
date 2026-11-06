@@ -277,8 +277,8 @@ _KIND_ACTION = {
         "confirm the current password once it is."
     ),
     LoginFailureKind.PASSWORD_CHANGE_REQUIRED: (
-        "Please ask the client to sign in to the portal, set a new password, and supply the "
-        "new password."
+        "Please let the client know that the password on this login needs to be changed "
+        "on the supplier portal."
     ),
 }
 
@@ -292,6 +292,7 @@ def build_client_email(
     when: datetime | None = None,
     client_name: str | None = None,
     job_id: Any = None,
+    screenshot_attached: bool = False,
 ) -> tuple[str, str]:
     """Return ``(subject, body)`` for the SystemsLink notice about a client's
     failed login. Plain text, never the password."""
@@ -302,6 +303,7 @@ def build_client_email(
     fallback = LoginFailureKind.CREDENTIALS_REJECTED
     reason = _KIND_SENTENCE.get(kind, _KIND_SENTENCE[fallback])
     action = _KIND_ACTION.get(kind, _KIND_ACTION[fallback])
+    attached = "A screenshot of the page the portal showed is attached.\n\n" if screenshot_attached else ""
     subject = f"Action required: {client} - {supplier} portal login needs updating ({kind})"
     body = (
         "Hello,\n\n"
@@ -315,6 +317,7 @@ def build_client_email(
         f"Date of attempt: {when.strftime('%d/%m/%Y')}\n\n"
         f"{reason}\n\n"
         f"Action required: {action}\n\n"
+        f"{attached}"
         "Until the login has been restored, we will be unable to collect this client's bills "
         "from this portal automatically.\n\n"
         "This is an automated message from the Inspired automation team; please do not reply "
@@ -334,9 +337,11 @@ def notify_client(
     portal_url: str | None,
     kind: LoginFailureKind | str | None,
     now: datetime | None = None,
+    screenshot: str | Path | None = None,
 ) -> bool:
     """Email SystemsLink about a client's failed login if the rules allow, so
     they can get the client to fix it. Returns True if an email was sent.
+    ``screenshot`` (0.13.12), when it is an existing file, is attached.
     Raises on a send or state-folder failure; callers that must not fail use
     ``handle_login_failure()``."""
     kind = _as_kind(kind)
@@ -362,14 +367,17 @@ def notify_client(
         )
         return False
 
+    attachments = [Path(screenshot)] if screenshot and Path(screenshot).is_file() else []
     subject, body = build_client_email(
         supplier_name=supplier_name, username=login, portal_url=portal_url,
         kind=kind, when=now.astimezone(), client_name=client_name, job_id=job_id,
+        screenshot_attached=bool(attachments),
     )
     graph_client.send_mail(
         config, recipient, subject, body,
         reply_to=(settings.get("reply_to") or "").strip() or None,
         sender_address=settings.get("sender_address") or DEFAULT_SENDER,
+        attachments=attachments,
     )
     try:
         _write_marker(marker, supplier_name=supplier_name, username=login, job_id=job_id, kind=kind, now=now)
@@ -398,8 +406,13 @@ def handle_login_failure(
     portal_url: str | None = None,
     client_name: str | None = None,
     team_alert: bool = True,
+    screenshot: str | Path | None = None,
 ) -> bool:
     """The single login-failure path for every supplier bot.
+
+    ``screenshot`` (0.13.12): the path ``browser_helpers.take_error_screenshot()``
+    returned for the failed page. Attached to the SystemsLink notice when the
+    file exists; the email only mentions it when it is attached.
 
     Logs, and emails SystemsLink when ``notify_client()``'s rules allow;
     otherwise raises the team alert through ``errors.add()``. A failure
@@ -441,6 +454,7 @@ def handle_login_failure(
             username=login,
             portal_url=url,
             kind=kind,
+            screenshot=screenshot,
         )
     except Exception as exc:
         logger.exception("LOGIN_FAILURE - could not email the SystemsLink notice about job %s", job_id)

@@ -34,7 +34,7 @@ from . import (
     validate_username,
 )
 
-__version__ = "0.13.11"
+__version__ = "0.13.12"
 
 __all__ = [
     "browser_helpers",

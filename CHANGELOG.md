@@ -5,6 +5,15 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.13.12] - 2026-11-06
+### Added
+- `login_failure.handle_login_failure(..., screenshot=None)` and `notify_client(..., screenshot=None)`: the failed page's screenshot is attached to the SystemsLink notice when the file exists, and the email then says so. A missing file sends the email without it.
+- `graph_client.send_mail(..., attachments=None)`: local files sent as Graph file attachments. A missing, unreadable or oversized file (over `MAX_ATTACHMENT_BYTES`, 3 MB in total, Graph's inline limit) is skipped with a warning; the email still goes.
+- `build_client_email(..., screenshot_attached=False)`.
+### Changed
+- `browser_helpers.take_error_screenshot()` returns the saved `Path` (None if no screenshot was taken) instead of always None, so a bot can pass it on.
+- The password-change notice only informs: "Please let the client know that the password on this login needs to be changed on the supplier portal." It no longer asks for the new password to be supplied.
+
 ## [0.13.11] - 2026-11-06
 ### Added
 - `password_change` module: one check every supplier bot calls during login to spot a forced password-change page, so it is reported as `PASSWORD_CHANGE_REQUIRED` (and SystemsLink is told) instead of a generic failure.

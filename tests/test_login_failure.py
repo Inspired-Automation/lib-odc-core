@@ -156,14 +156,49 @@ def test_email_names_client_login_and_job_without_password():
     assert "s3cret" not in body
 
 
-def test_email_password_change_asks_for_new_password():
+def test_email_password_change_informs_only():
     subject, body = login_failure.build_client_email(
         supplier_name="TGP Mygateway", username="bills@acme.com", portal_url=None,
         kind=K.PASSWORD_CHANGE_REQUIRED, client_name="Acme Ltd", job_id=1,
     )
     assert "(password change required)" in subject
     assert "asking for the password on this login to be changed" in body
-    assert "set a new password" in body
+    assert "Please let the client know that the password on this login needs to be changed" in body
+    assert "supply" not in body
+    assert "screenshot" not in body
+
+
+def test_email_mentions_attached_screenshot():
+    _, body = login_failure.build_client_email(
+        supplier_name="TGP Mygateway", username="bills@acme.com", portal_url=None,
+        kind=K.PASSWORD_CHANGE_REQUIRED, client_name="Acme Ltd", job_id=1, screenshot_attached=True,
+    )
+    assert "A screenshot of the page the portal showed is attached." in body
+
+
+@patch("odc_core.login_failure.graph_client.send_mail")
+def test_handle_attaches_existing_screenshot(mock_send, tmp_path):
+    state = tmp_path / "state"
+    shot = tmp_path / "21090_TGP MYGATEWAY_password_change_required.png"
+    shot.write_bytes(b"png")
+    login_failure.handle_login_failure(
+        MagicMock(), _config(state), supplier_name="TGP Mygateway", job_id=5448, row=ROW,
+        detail="Change Password page", kind=K.PASSWORD_CHANGE_REQUIRED, screenshot=str(shot),
+    )
+    args, kwargs = mock_send.call_args
+    assert kwargs["attachments"] == [shot]
+    assert "screenshot of the page" in args[3]
+
+
+@patch("odc_core.login_failure.graph_client.send_mail")
+def test_handle_missing_screenshot_sends_without(mock_send, tmp_path):
+    login_failure.handle_login_failure(
+        MagicMock(), _config(tmp_path), supplier_name="TGP Mygateway", job_id=5448, row=ROW,
+        detail="x", kind=K.PASSWORD_CHANGE_REQUIRED, screenshot=tmp_path / "gone.png",
+    )
+    args, kwargs = mock_send.call_args
+    assert kwargs["attachments"] == []
+    assert "screenshot" not in args[3]
 
 
 # --- notify_client / handle_login_failure -------------------------------------

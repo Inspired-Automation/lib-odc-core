@@ -554,7 +554,8 @@ so something else must reset the row to `pending` if it needs to run again.
 
 ```python
 send_mail(config: dict, recipient: str, subject: str, body: str, *,
-          reply_to: str | None = None, sender_address: str | None = None) -> None
+          reply_to: str | None = None, sender_address: str | None = None,
+          attachments: Iterable[str | Path] | None = None) -> None
 read_otp_code(config: dict, mailbox: str, login_time: datetime, *,
               subject_contains: str, body_start: str, body_end: str,
               timeout_s: int = 3600, poll_interval_s: int = 10) -> str
@@ -562,7 +563,9 @@ read_otp_code(config: dict, mailbox: str, login_time: datetime, *,
 
 `send_mail()` sends as `sender_address` if given, else
 `config["graph"]["sender_address"]`, sets Reply-To when `reply_to` is given
-(0.13.7), and raises `RuntimeError` on any non-2xx Graph response.
+(0.13.7), attaches `attachments` as Graph file attachments (0.13.12; a
+missing, unreadable or oversized file, past 3 MB in total, is skipped with a
+warning), and raises `RuntimeError` on any non-2xx Graph response.
 
 `read_otp_code()` polls `mailbox` for messages received after `login_time` whose
 subject contains `subject_contains`, extracts the first 4-8 digit group found
@@ -582,8 +585,13 @@ handle_login_failure(errors, config: dict, *, supplier_name: str, job_id,
                      row: dict | None = None, detail: str | None = None,
                      kind=None, username: str | None = None,
                      portal_url: str | None = None, client_name: str | None = None,
-                     team_alert: bool = True) -> bool
+                     team_alert: bool = True,
+                     screenshot: str | Path | None = None) -> bool
 ```
+
+`screenshot` (0.13.12) is the path `browser_helpers.take_error_screenshot()`
+returned for the failed page; it is attached to the SystemsLink notice when
+the file exists, and the body then says a screenshot is attached.
 
 Every supplier bot's `main.py` reports a failed login through
 `handle_login_failure()`, passing the supplier's `_login_failure_detail` and
@@ -740,7 +748,7 @@ human_delay(config: dict) -> None
 move_mouse_toward(page, locator) -> None
 human_click(page, locator) -> None
 human_type(page, selector: str, text: str, config: dict) -> None
-take_error_screenshot(page, label: str, config: dict) -> None
+take_error_screenshot(page, label: str, config: dict) -> Path | None
 dismiss_cookie_banner(page) -> bool
 dismiss_cookie_banners(page) -> None
 ```
@@ -752,7 +760,8 @@ Locator or a CSS/text selector string. Pacing comes from `config["delays"]`.
 
 `take_error_screenshot()` never raises: a screenshot failure must not interrupt
 the run. It writes `{_process_id}_{_supplier_name}_{label}_{timestamp}.png` into
-`config["_logs_dir"]`.
+`config["_logs_dir"]` and returns that path (None when no screenshot was
+taken; 0.13.12, earlier versions always returned None).
 
 ### 3.11 `db` - connection and transient-failure retry
 

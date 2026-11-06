@@ -98,10 +98,11 @@ def test_take_error_screenshot_writes_to_logs_dir(tmp_path):
         "_supplier_name": "crown",
     }
 
-    browser_helpers.take_error_screenshot(page, "login_failed", config)
+    returned = browser_helpers.take_error_screenshot(page, "login_failed", config)
 
     page.screenshot.assert_called_once()
     saved_path = page.screenshot.call_args.kwargs["path"]
+    assert str(returned) == saved_path
     assert page.screenshot.call_args.kwargs["full_page"] is True
     assert saved_path.startswith(str(tmp_path))
     assert "PROC1_CROWN_login_failed_" in saved_path
@@ -113,7 +114,7 @@ def test_take_error_screenshot_swallows_failures(tmp_path):
     page = MagicMock()
     page.screenshot.side_effect = RuntimeError("browser closed")
 
-    browser_helpers.take_error_screenshot(page, "login_failed", {"_logs_dir": str(tmp_path)})
+    assert browser_helpers.take_error_screenshot(page, "login_failed", {"_logs_dir": str(tmp_path)}) is None
 
 
 def test_dismiss_cookie_banner_clicks_first_visible_button():

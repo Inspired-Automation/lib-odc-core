@@ -204,3 +204,46 @@ def test_send_mail_defaults_unchanged(mock_token, mock_post):
 
     assert "/users/bot@example.com/sendMail" in mock_post.call_args.args[0]
     assert "replyTo" not in mock_post.call_args.kwargs["json"]["message"]
+
+
+@patch("odc_core.graph_client.requests.post")
+@patch("odc_core.graph_client._acquire_token", return_value="tok")
+def test_send_mail_attaches_files(mock_token, mock_post, tmp_path):
+    import base64
+    mock_post.return_value = MagicMock(status_code=202)
+    shot = tmp_path / "123_TGP_password_change_required.png"
+    shot.write_bytes(b"\x89PNG fake")
+
+    graph_client.send_mail(CONFIG, "to@example.com", "Subj", "Body", attachments=[shot])
+
+    attachments = mock_post.call_args.kwargs["json"]["message"]["attachments"]
+    assert attachments == [{
+        "@odata.type": "#microsoft.graph.fileAttachment",
+        "name": shot.name,
+        "contentType": "image/png",
+        "contentBytes": base64.b64encode(b"\x89PNG fake").decode("ascii"),
+    }]
+
+
+@patch("odc_core.graph_client.requests.post")
+@patch("odc_core.graph_client._acquire_token", return_value="tok")
+def test_send_mail_skips_missing_or_oversized_attachments(mock_token, mock_post, tmp_path, monkeypatch):
+    mock_post.return_value = MagicMock(status_code=202)
+    monkeypatch.setattr(graph_client, "MAX_ATTACHMENT_BYTES", 10)
+    big = tmp_path / "big.png"
+    big.write_bytes(b"x" * 11)
+
+    graph_client.send_mail(
+        CONFIG, "to@example.com", "Subj", "Body", attachments=[tmp_path / "missing.png", big, None],
+    )
+
+    mock_post.assert_called_once()
+    assert "attachments" not in mock_post.call_args.kwargs["json"]["message"]
+
+
+@patch("odc_core.graph_client.requests.post")
+@patch("odc_core.graph_client._acquire_token", return_value="tok")
+def test_send_mail_no_attachments_key_by_default(mock_token, mock_post):
+    mock_post.return_value = MagicMock(status_code=202)
+    graph_client.send_mail(CONFIG, "to@example.com", "Subj", "Body")
+    assert "attachments" not in mock_post.call_args.kwargs["json"]["message"]

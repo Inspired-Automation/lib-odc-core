@@ -142,7 +142,8 @@ for detail in job_details:
   run is prod, and that supplier+login was not notified in the last
   `cooldown_hours`. Sent from `noreply_automation@inspiredenergy.co.uk`;
   names the client, supplier, login, portal and ODC job; never includes the
-  password. Suppliers set
+  password. Pass `screenshot=` (the path `take_error_screenshot()` returns,
+  0.13.12) to attach the failed page. Suppliers set
   `self._login_failure_kind` using `classify_portal_message()` on text the
   portal displayed (never on exception text) and `escalate()`.
 - `password_change.py` (0.13.11) - `detect_password_change(page)` /

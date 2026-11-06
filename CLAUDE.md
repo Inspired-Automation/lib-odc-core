@@ -377,6 +377,15 @@ entry point of its own.
   entry.
 
 ## Change Log
+- 2026-11-06: v0.13.12 - PATCH. Login-failure notices to SystemsLink can carry
+  the failed page's screenshot: `handle_login_failure(screenshot=...)`
+  attaches it when the file exists (the email says so), via the new
+  `graph_client.send_mail(attachments=...)` (Graph file attachments, 3 MB
+  total, bad or oversized files skipped with a warning, the email still
+  sent). `take_error_screenshot()` now returns the saved path. The
+  password-change notice only informs SystemsLink that the password needs
+  changing (business decision: informing is enough). Every supplier bot is
+  re-pinned to 0.13.12 and wired to `password_change` the same day.
 - 2026-11-06: v0.13.11 - PATCH (behaviour change, no breaking signature for
   `handle_login_failure()`). Login-failure notices go to SystemsLink
   (`support@systems-link.com`, configurable as
