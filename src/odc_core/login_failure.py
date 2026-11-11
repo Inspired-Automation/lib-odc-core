@@ -14,8 +14,11 @@ password change). ``handle_login_failure()`` replaces all of that:
 
    - the failure is a credential problem the client can fix
      (``CLIENT_NOTIFIABLE_KINDS``: credentials rejected, account locked,
-     password change required). Our-side faults (portal down, page errors,
-     OTP mailbox, human-assist timeout) are ``OTHER`` and go to the team only;
+     password change required, and from 0.14.0 OTP not received - the
+     portal sends the code to the login's registered email address, which
+     the client must point at our OTP mailbox). Our-side faults (portal
+     down, page errors, human-assist timeout) are ``OTHER`` and go to the
+     team only;
    - the client is not Inspired PLC or Ignite
      (``file_allocation_core.routing.is_inspired_client``);
    - this is a production run (``config["env"] == "prod"``). A dev run sends
@@ -35,6 +38,42 @@ knows which page text is a portal message and which is an exception string.
 across retries. Never classify exception text: Playwright errors quote the
 selector they were waiting on, which can itself read "password invalid".
 
+Toolkit reporting (0.14.0)
+--------------------------
+Login failures are being diverted from team alerts and SystemsLink emails to
+the inse-toolkit web app. When the per-env tables dict carries the optional
+``report_login_failure`` key, ``handle_login_failure()`` first records the
+failure through that stored procedure (``spODC_ReportLoginFailure``, via
+``report_login_failure()``). For a credential kind on a single-credential
+service the procedure pauses job creation for that client + supplier service,
+and when the service has named owners the toolkit emails them. In that case
+(paused, has an owner, credential kind, not multi-credential) the toolkit owns
+the failure: no SystemsLink email, no ``errors.add()``, one INFO line, and
+``handle_login_failure()`` returns False. In every other case (key absent,
+no owner, ``OTHER`` kind, multi-credential, or the report call failed) steps
+2 and 3 above run exactly as in 0.13.12; a report call that raised is also
+reported to the team with its own ``errors.add()``.
+
+``report_login_success()`` calls ``spODC_ReportLoginSuccess`` (tables key
+``report_login_success``), which resolves any open failure for the job's
+service and clears the pause. A single-credential bot should call it once,
+right after a successful login. Until a bot does, the toolkit infers a passed
+test from the test job's results.
+
+Both keys are optional. A missing or blank key means "not configured": no
+database call, and behaviour identical to 0.13.12. The procedures exist on
+``Titan_INSE_DEV`` only so far, so only the ``dev`` block should carry them::
+
+    tables:
+      dev:
+        report_login_failure: Titan_INSE_DEV.dbo.spODC_ReportLoginFailure
+        report_login_success: Titan_INSE_DEV.dbo.spODC_ReportLoginSuccess
+
+The tables dict and DSN come from ``config`` (``config["tables"]["live"]``
+when ``config["env"]`` is prod or live, else ``["dev"]``;
+``config["database"]["dsn"]``) unless passed as ``tables=`` / ``dsn=``.
+The password is never passed to either procedure or logged.
+
 Config (all optional; defaults shown)::
 
     login_failure_notification:
@@ -52,6 +91,7 @@ import hashlib
 import json
 import logging
 import re
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from enum import StrEnum
 from pathlib import Path
@@ -60,7 +100,7 @@ from typing import Any
 from file_allocation_core.routing import is_inspired_client
 from file_allocation_core.unc import to_unc
 
-from . import graph_client
+from . import db, graph_client, jobstodo
 
 logger = logging.getLogger(__name__)
 
@@ -71,6 +111,12 @@ class LoginFailureKind(StrEnum):
     CREDENTIALS_REJECTED = "credentials rejected"
     ACCOUNT_LOCKED = "account locked"
     PASSWORD_CHANGE_REQUIRED = "password change required"
+    #: 0.14.0. The portal accepted the password and sent a one-time code,
+    #: but it never reached our OTP mailbox: the login's registered email
+    #: address does not deliver or forward there. Classified by the bot
+    #: (it knows when it is waiting for an OTP), never by
+    #: classify_portal_message().
+    OTP_NOT_RECEIVED = "otp not received"
     OTHER = "other"
 
 
@@ -80,6 +126,7 @@ CLIENT_NOTIFIABLE_KINDS = frozenset({
     LoginFailureKind.CREDENTIALS_REJECTED,
     LoginFailureKind.ACCOUNT_LOCKED,
     LoginFailureKind.PASSWORD_CHANGE_REQUIRED,
+    LoginFailureKind.OTP_NOT_RECEIVED,
 })
 
 DEFAULT_SENDER = "noreply_automation@inspiredenergy.co.uk"
@@ -127,9 +174,12 @@ _PORTAL_PATTERNS: tuple[tuple[LoginFailureKind, re.Pattern[str]], ...] = (
 
 _KIND_RANK = {
     LoginFailureKind.OTHER: 0,
-    LoginFailureKind.CREDENTIALS_REJECTED: 1,
-    LoginFailureKind.ACCOUNT_LOCKED: 2,
-    LoginFailureKind.PASSWORD_CHANGE_REQUIRED: 3,
+    # Below the password kinds: an OTP is only asked for once the password
+    # was accepted, so a "password incorrect" seen on any attempt wins.
+    LoginFailureKind.OTP_NOT_RECEIVED: 1,
+    LoginFailureKind.CREDENTIALS_REJECTED: 2,
+    LoginFailureKind.ACCOUNT_LOCKED: 3,
+    LoginFailureKind.PASSWORD_CHANGE_REQUIRED: 4,
 }
 
 
@@ -265,6 +315,10 @@ _KIND_SENTENCE = {
     LoginFailureKind.PASSWORD_CHANGE_REQUIRED: (
         "The portal is asking for the password on this login to be changed before it can be used."
     ),
+    LoginFailureKind.OTP_NOT_RECEIVED: (
+        "The portal accepted the password and sent a one-time passcode, but the passcode never "
+        "reached us. The portal sends it to the email address registered on this login."
+    ),
 }
 
 _KIND_ACTION = {
@@ -279,6 +333,11 @@ _KIND_ACTION = {
     LoginFailureKind.PASSWORD_CHANGE_REQUIRED: (
         "Please let the client know that the password on this login needs to be changed "
         "on the supplier portal."
+    ),
+    LoginFailureKind.OTP_NOT_RECEIVED: (
+        "Please ask the client to make sure the email address registered on this login delivers "
+        "or forwards the portal's one-time passcode emails to "
+        "noreply_automation@inspiredenergy.co.uk."
     ),
 }
 
@@ -393,6 +452,204 @@ def notify_client(
     return True
 
 
+#: Optional keys in the per-env tables dict naming the two toolkit procedures.
+REPORT_FAILURE_KEY = "report_login_failure"
+REPORT_SUCCESS_KEY = "report_login_success"
+
+_PROC_NAME_RE = re.compile(r"^[A-Za-z0-9_.\[\]]+$")
+
+# Both procedures return nothing but OUTPUT parameters, which pyodbc cannot
+# read directly: declare them in the batch and SELECT them back as one row.
+_REPORT_FAILURE_SQL = (
+    "SET NOCOUNT ON; "
+    "DECLARE @f INT, @p BIT, @o BIT; "
+    "EXEC {proc} @job_id = ?, @kind = ?, @detail = ?, @username = ?, @portal_url = ?, "
+    "@screenshot_path = ?, @process_id = ?, @multi_credential = ?, "
+    "@failure_id = @f OUTPUT, @paused = @p OUTPUT, @has_owner = @o OUTPUT; "
+    "SELECT @f, @p, @o;"
+)
+
+_REPORT_SUCCESS_SQL = (
+    "SET NOCOUNT ON; "
+    "DECLARE @r BIT; "
+    "EXEC {proc} @job_id = ?, @process_id = ?, @resolved = @r OUTPUT; "
+    "SELECT @r;"
+)
+
+
+@dataclass(frozen=True)
+class LoginFailureReport:
+    """What ``spODC_ReportLoginFailure`` said about a recorded failure."""
+
+    failure_id: int | None
+    paused: bool
+    has_owner: bool
+
+
+def _report_target(config: dict, key: str, tables: dict | None, dsn: str | None) -> tuple[str, str] | None:
+    """Return ``(procedure, dsn)`` for a toolkit procedure, or None when it is
+    not configured. A missing key or block is never an error."""
+    config = config or {}
+    if tables is None:
+        env = str(config.get("env") or "dev").lower()
+        by_env = config.get("tables")
+        tables = by_env.get("live" if env in ("prod", "live") else "dev") if isinstance(by_env, dict) else None
+    if not isinstance(tables, dict):
+        return None
+    proc = str(tables.get(key) or "").strip()
+    if not proc:
+        return None
+    if dsn is None:
+        database = config.get("database")
+        dsn = database.get("dsn") if isinstance(database, dict) else None
+    dsn = str(dsn or "").strip()
+    if not dsn:
+        logger.warning("LOGIN_FAILURE - tables.%s is set but there is no database dsn; not calling it", key)
+        return None
+    if not _PROC_NAME_RE.match(proc):
+        raise ValueError(f"LOGIN_FAILURE - tables.{key} is not a valid procedure name: {proc!r}")
+    return proc, dsn
+
+
+def _int_or_none(value: Any) -> int | None:
+    try:
+        return int(str(value).strip())
+    except (TypeError, ValueError):
+        return None
+
+
+def _clip(value: Any, length: int) -> str | None:
+    text = str(value).strip() if value is not None else ""
+    return text[:length] if text else None
+
+
+def _first_row(cursor: Any) -> Any:
+    # Skip any rowcount-only results ahead of the final SELECT.
+    while cursor.description is None:
+        if not cursor.nextset():
+            return None
+    return cursor.fetchone()
+
+
+def report_login_failure(
+    config: dict,
+    *,
+    job_id: Any,
+    kind: LoginFailureKind | str | None,
+    detail: str | None = None,
+    username: str | None = None,
+    portal_url: str | None = None,
+    screenshot: str | Path | None = None,
+    process_id: Any = None,
+    multi_credential: bool = False,
+    tables: dict | None = None,
+    dsn: str | None = None,
+) -> LoginFailureReport | None:
+    """Record a failed login for the inse-toolkit (0.14.0).
+
+    Calls the procedure named by the optional tables key
+    ``report_login_failure`` (``spODC_ReportLoginFailure``). Returns None, with
+    no database call, when that key is missing or blank. Otherwise returns a
+    ``LoginFailureReport``: ``paused`` is True when job creation for the job's
+    client + supplier service is now paused (a credential kind on a
+    single-credential service), and ``has_owner`` is True when the service has
+    named owners, whom the toolkit emails.
+
+    ``tables`` / ``dsn`` default to ``config["tables"][live|dev]`` (by
+    ``config["env"]``) and ``config["database"]["dsn"]``. ``screenshot`` is
+    stored as its path (UNC form), not attached. ``detail`` is cut to 1000
+    characters, ``username`` to 100, ``portal_url`` to 300 and the screenshot
+    path to 500. The password is never passed. Raises on a database error or a
+    non-numeric ``job_id``; callers that must not fail use
+    ``handle_login_failure()``.
+    """
+    target = _report_target(config, REPORT_FAILURE_KEY, tables, dsn)
+    if target is None:
+        return None
+    proc, dsn = target
+    job = _int_or_none(job_id)
+    if job is None:
+        raise ValueError(f"LOGIN_FAILURE - job_id {job_id!r} is not a number; cannot report the failure")
+    params = (
+        job,
+        str(_as_kind(kind)),
+        _clip(detail, 1000),
+        _clip(username, 100),
+        _clip(portal_url, 300),
+        _clip(to_unc(str(screenshot)), 500) if screenshot else None,
+        _int_or_none(process_id),
+        1 if multi_credential else 0,
+    )
+    sql = _REPORT_FAILURE_SQL.format(proc=proc)
+
+    def work(conn) -> LoginFailureReport:
+        cursor = conn.cursor()
+        cursor.execute(sql, *params)
+        row = _first_row(cursor)
+        conn.commit()
+        if row is None:
+            raise RuntimeError(f"LOGIN_FAILURE - {proc} returned no output row for job {job}")
+        return LoginFailureReport(
+            failure_id=_int_or_none(row[0]), paused=bool(row[1]), has_owner=bool(row[2]),
+        )
+
+    # Replaying is safe: a transient SQLSTATE means nothing was committed.
+    return db.run(dsn, work, description=f"login_failure.report_login_failure({job})")
+
+
+def report_login_success(
+    config: dict,
+    *,
+    job_id: Any,
+    process_id: Any = None,
+    tables: dict | None = None,
+    dsn: str | None = None,
+) -> bool:
+    """Tell the inse-toolkit a login succeeded (0.14.0).
+
+    Calls the procedure named by the optional tables key
+    ``report_login_success`` (``spODC_ReportLoginSuccess``), which resolves any
+    open failure for the job's client + supplier service and clears its pause;
+    it is a cheap no-op when there is none. Returns True when a failure was
+    resolved. Returns False, with no database call, when the key is missing or
+    blank. Never raises: an error is logged as a warning and returns False.
+
+    A single-credential bot should call this once, right after a successful
+    login. ``tables`` / ``dsn`` resolve as in ``report_login_failure()``.
+    """
+    try:
+        target = _report_target(config, REPORT_SUCCESS_KEY, tables, dsn)
+        if target is None:
+            return False
+        proc, dsn = target
+        job = _int_or_none(job_id)
+        if job is None:
+            raise ValueError(f"job_id {job_id!r} is not a number")
+        params = (job, _int_or_none(process_id))
+        sql = _REPORT_SUCCESS_SQL.format(proc=proc)
+
+        def work(conn) -> bool:
+            cursor = conn.cursor()
+            cursor.execute(sql, *params)
+            row = _first_row(cursor)
+            conn.commit()
+            return bool(row[0]) if row is not None else False
+
+        resolved = db.run(dsn, work, description=f"login_failure.report_login_success({job})")
+    except Exception:
+        logger.warning(
+            "LOGIN_FAILURE - could not report the successful login for job %s to the toolkit",
+            job_id, exc_info=True,
+        )
+        return False
+    if resolved:
+        logger.info(
+            "LOGIN_FAILURE - login succeeded for job %s; the open login failure for its service "
+            "is resolved and job creation is no longer paused", job_id,
+        )
+    return resolved
+
+
 def handle_login_failure(
     errors: Any,
     config: dict,
@@ -407,8 +664,23 @@ def handle_login_failure(
     client_name: str | None = None,
     team_alert: bool = True,
     screenshot: str | Path | None = None,
+    process_id: Any = None,
+    multi_credential: bool | None = None,
+    tables: dict | None = None,
+    dsn: str | None = None,
 ) -> bool:
     """The single login-failure path for every supplier bot.
+
+    0.14.0: when the tables key ``report_login_failure`` is set, the failure
+    is first recorded for the inse-toolkit (``report_login_failure()``,
+    passing ``process_id``, ``tables`` and ``dsn`` through). If that pauses the
+    service, the service has an owner, the kind is a credential kind and this
+    is not a multi-credential failure, the toolkit owns it: no SystemsLink
+    email, no ``errors.add()``, and the return value is False. Otherwise
+    everything below applies unchanged, and a report call that raised is
+    logged and reported to the team as its own error. ``multi_credential``
+    None (the default) means ``not team_alert``, or a ``row`` whose job-level
+    login is the ``multi_credential`` sentinel.
 
     ``screenshot`` (0.13.12): the path ``browser_helpers.take_error_screenshot()``
     returned for the failed page. Attached to the SystemsLink notice when the
@@ -441,6 +713,43 @@ def handle_login_failure(
         "LOGIN_FAILURE - %s login failed for job %s | kind=%s | client=%s | user=%s | %s",
         supplier_name, job_id, kind, client or "(none)", login or "(none)", text,
     )
+    if multi_credential is None:
+        multi = (not team_alert) or jobstodo.is_multi_credential_job(row.get("username"), row.get("password"))
+    else:
+        multi = bool(multi_credential)
+    report: LoginFailureReport | None = None
+    report_error: Exception | None = None
+    try:
+        report = report_login_failure(
+            config, job_id=job_id, kind=kind, detail=detail, username=login, portal_url=url,
+            screenshot=screenshot, process_id=process_id, multi_credential=multi,
+            tables=tables, dsn=dsn,
+        )
+    except Exception as exc:
+        logger.exception("LOGIN_FAILURE - could not record the login failure for job %s for the toolkit", job_id)
+        report_error = exc
+
+    if report is not None and report.paused and report.has_owner and kind in CLIENT_NOTIFIABLE_KINDS and not multi:
+        logger.info(
+            "LOGIN_FAILURE - job %s recorded for the toolkit as failure id %s; the service is paused "
+            "and its owners will be notified by the toolkit (no SystemsLink notice, no team alert)",
+            job_id, report.failure_id,
+        )
+        return False
+
+    # The procedure records a first OTP miss without pausing (one late email
+    # is not a login problem) and pauses on a second miss in a row. Until
+    # then the toolkit holds the record, so nobody else is told either.
+    if (report is not None and not report.paused and report.has_owner
+            and kind == LoginFailureKind.OTP_NOT_RECEIVED and not multi):
+        logger.warning(
+            "LOGIN_FAILURE - job %s: OTP not received, recorded for the toolkit as failure id %s; "
+            "a second miss on the next run pauses the service and notifies its owners "
+            "(no SystemsLink notice, no team alert)",
+            job_id, report.failure_id,
+        )
+        return False
+
     recipient = None
     sent = False
     email_error: Exception | None = None
@@ -468,6 +777,11 @@ def handle_login_failure(
         errors.add(f"{supplier_name} login failed for job {job_id} ({kind}): {text}")
     if email_error is not None:
         errors.add(f"{supplier_name} login-failure notice to SystemsLink failed for job {job_id}", exception=email_error)
+    if report_error is not None:
+        errors.add(
+            f"{supplier_name} login failure for job {job_id} could not be recorded for the toolkit",
+            exception=report_error,
+        )
     return sent
 
 

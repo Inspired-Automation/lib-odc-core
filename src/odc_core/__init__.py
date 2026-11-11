@@ -4,7 +4,7 @@ odc_core - shared infrastructure for ODC (Online Data Collection) supplier bots.
 Every supplier project (automation-odc-wave, automation-odc-british-gas, ...)
 depends on this package instead of re-implementing job claiming, file
 allocation/save, job-status updates, Microsoft Graph mail/OTP reading, or
-login-failure handling (login_failure, 0.13.7), forced password-change
+login-failure handling (login_failure, 0.13.7; reported to inse-toolkit 0.14.0), forced password-change
 detection (password_change, 0.13.11), or grab-all resume
 (grab_all_progress, 0.13.8).
 
@@ -34,7 +34,7 @@ from . import (
     validate_username,
 )
 
-__version__ = "0.13.12"
+__version__ = "0.14.0"
 
 __all__ = [
     "browser_helpers",

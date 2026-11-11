@@ -92,6 +92,16 @@ entry point of its own.
   read-only: `Titan_INSE.dbo.TOOLKIT_PORTAL_SCRAPE_ASSIST_RUN` and
   `TOOLKIT_USER`. They are owned by inse-toolkit, and live on `Titan_INSE`
   even for DEV runs.
+- `login_failure` (0.14.0) calls two inse-toolkit stored procedures,
+  `spODC_ReportLoginFailure` and `spODC_ReportLoginSuccess`, named by the
+  optional tables keys `report_login_failure` / `report_login_success`.
+  They are owned by inse-toolkit and exist on `Titan_INSE_DEV` only so far.
+  Unlike every other module, `login_failure` reads the tables dict and DSN
+  from the whole `config` (`config["tables"]["live"]` when `config["env"]`
+  is prod or live, else `["dev"]`; `config["database"]["dsn"]`), because
+  bots call `handle_login_failure(errors, config, ...)` with `config` only;
+  `tables=` / `dsn=` keywords override. A missing or blank key means no
+  database call and never raises.
 - `sugar_client.py` (added 0.7.0) is the one module that talks to a second,
   unrelated database: SugarCRM itself (`DSN=Sugar Corp`, MySQL), read-only,
   looking up `accounts.NAME` by id. Not Titan, not Jupiter - a caller must
@@ -377,6 +387,34 @@ entry point of its own.
   entry.
 
 ## Change Log
+- 2026-11-10: v0.14.0 - MINOR, additive. Login failures are being diverted
+  to inse-toolkit, which pauses job creation for the service and lets the
+  service's named owners fix the login. New
+  `login_failure.report_login_failure()` (returns `LoginFailureReport`:
+  `failure_id`, `paused`, `has_owner`) and `report_login_success()`, calling
+  `spODC_ReportLoginFailure` / `spODC_ReportLoginSuccess`, named by two new
+  optional tables keys, `report_login_failure` and `report_login_success`.
+  `handle_login_failure()` reports first (new keywords `process_id`,
+  `multi_credential`, `tables`, `dsn`). When the service is paused and has
+  an owner, the kind is a credential kind and the failure is not
+  multi-credential, the toolkit owns it: no SystemsLink email, no
+  `errors.add()`, returns False. Otherwise 0.13.12 behaviour, plus an extra
+  `errors.add()` if the report call raised. A config without the keys makes
+  no database call and behaves exactly as 0.13.12. The tables dict and DSN
+  are read from `config["tables"][live|dev]` and `config["database"]["dsn"]`.
+  DEV only so far: the procedures exist on `Titan_INSE_DEV` only, and no
+  bot is updated yet (see Outstanding TODOs). Tests mock
+  `odc_core.db.pyodbc.connect`; nothing was run against a database. Not
+  released.
+  Also in 0.14.0 (2026-11-11): `LoginFailureKind.OTP_NOT_RECEIVED`, a
+  credential kind for a portal OTP that never reached our mailbox (the
+  login's registered email does not forward there). Requested so Pozitive
+  Energy's "OTP not received" goes to the service's business owner, not
+  the team. It was `OTHER` (our-side) before. The procedure must accept it
+  too (accounts-and-jobs-refresh `sql/dev/17`), and inse-toolkit needs a
+  label and owner action for it. A first OTP miss (recorded, not paused,
+  service has an owner) is left to the toolkit too: a WARNING, no
+  SystemsLink email, no team alert. 335 tests pass.
 - 2026-11-06: v0.13.12 - PATCH. Login-failure notices to SystemsLink can carry
   the failed page's screenshot: `handle_login_failure(screenshot=...)`
   attaches it when the file exists (the email says so), via the new
@@ -1072,6 +1110,17 @@ entry point of its own.
   does not exist and made the documented `pip install` URLs 404).
 
 ## Outstanding TODOs
+- v0.14.0 (not released). The bots are not updated yet. Each bot needs the
+  two tables keys in its `config.yaml` and `config.template.yaml`
+  (`report_login_failure`, `report_login_success`; the `dev` block only for
+  now, because the procedures are not on live `Titan_INSE`) and a
+  `login_failure.report_login_success(config, job_id=..., process_id=...)`
+  call right after a successful login (single-credential jobs). Until a bot
+  calls it, the toolkit infers a passed test from the test job's results.
+  Bots can also pass `process_id=` to `handle_login_failure()`. Not yet
+  checked against the real procedures: the OUTPUT-parameter batch through
+  the legacy "SQL Server" ODBC driver, and that the bot runners' accounts
+  can execute both procedures.
 - v0.13.8 released 2026-10-20. Apply automation-odc-electric-ireland
   migration 003 to live `Titan_INSE` before adding the `grab_all_cycle`/
   `grab_all_progress` keys to a live runner's `config.yaml`. Confirm the bot runners' service accounts can SELECT

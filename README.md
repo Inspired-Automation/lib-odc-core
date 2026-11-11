@@ -138,7 +138,7 @@ for detail in job_details:
   never both, except when the notice email fails. It emails SystemsLink
   (`support@systems-link.com`, who contact the client) when the kind is a
   credential problem (`CREDENTIALS_REJECTED`, `ACCOUNT_LOCKED`,
-  `PASSWORD_CHANGE_REQUIRED`), the client is not Inspired PLC or Ignite, the
+  `PASSWORD_CHANGE_REQUIRED`, or from 0.14.0 `OTP_NOT_RECEIVED`), the client is not Inspired PLC or Ignite, the
   run is prod, and that supplier+login was not notified in the last
   `cooldown_hours`. Sent from `noreply_automation@inspiredenergy.co.uk`;
   names the client, supplier, login, portal and ODC job; never includes the
@@ -146,6 +146,15 @@ for detail in job_details:
   0.13.12) to attach the failed page. Suppliers set
   `self._login_failure_kind` using `classify_portal_message()` on text the
   portal displayed (never on exception text) and `escalate()`.
+  0.14.0: when the optional tables key `report_login_failure` is set, the
+  failure is first recorded for inse-toolkit (`report_login_failure()`,
+  stored procedure `spODC_ReportLoginFailure`). If that pauses the service
+  and the service has named owners (credential kinds, single-credential
+  only), the toolkit owns it: no SystemsLink email and no team alert.
+  `report_login_success(config, job_id=..., process_id=...)` (tables key
+  `report_login_success`) clears the pause; call it once right after a
+  successful login. Both keys are optional and DEV only so far; without them
+  nothing changes. See the spec, section 3.7a.
 - `password_change.py` (0.13.11) - `detect_password_change(page)` /
   `wait_for_password_change(page, done=...)`: spot a forced password-change
   page during login (URL route, old/new or new/confirm password form, or a
@@ -191,6 +200,9 @@ tables:
   live: {jobs: ..., job_details: ..., scrape_data: ..., scrape_accounts: ..., suppliers: ..., web_scrape_data: ..., multi_credential: ..., credential: ..., db_name: ...}
   # grab-all callers only: grab_all_data: ODC_grab_all_data
   # grab-all resume (0.13.8): grab_all_cycle: ODC_grab_all_cycle, grab_all_progress: ODC_grab_all_progress
+  # login failures to inse-toolkit (0.14.0), optional, dev block only for now:
+  #   report_login_failure: Titan_INSE_DEV.dbo.spODC_ReportLoginFailure
+  #   report_login_success: Titan_INSE_DEV.dbo.spODC_ReportLoginSuccess
 
 graph:
   client_id:

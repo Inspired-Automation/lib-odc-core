@@ -54,8 +54,14 @@ tables:
     multi_credential: ODC_multi_credentials
     credential: ODC_credentials
     db_name: Titan_INSE_DEV
+    # 0.14.0, optional: the inse-toolkit login-failure procedures (§3.7a).
+    # Missing or blank = not configured, no database call. DEV only so far.
+    report_login_failure: Titan_INSE_DEV.dbo.spODC_ReportLoginFailure
+    report_login_success: Titan_INSE_DEV.dbo.spODC_ReportLoginSuccess
   live:
     # same keys, pointing at Titan_INSE and jupiter.aa.web_scrape_data
+    # (not report_login_failure / report_login_success yet: the procedures
+    # are not on Titan_INSE)
 
 graph:
   client_id:
@@ -113,6 +119,13 @@ env: dev
 | `grab_all` | `tables["jobs"]`, `tables["grab_all_data"]`, `dsn`; `allocate()` needs the same config as `file_allocation` |
 | `grab_all_progress` | `tables["grab_all_cycle"]`, `tables["grab_all_progress"]`, `dsn` |
 | `sftp_upload` | `config["sftp"]`; `pending_files()` also `tables["jobs"]`, `tables["job_details"]`, `tables["scrape_data"]`, optional `tables["grab_all_data"]`, `dsn` |
+| `login_failure` | `config["env"]`, optional `config["login_failure_notification"]`, `config["graph"]`, `config["pdf_auto"]["base_path"]`. Toolkit reporting (0.14.0): optional `tables["report_login_failure"]` / `tables["report_login_success"]` and `dsn`, read from the whole config (`config["tables"]["live"]` when `config["env"]` is `prod`/`live`, else `["dev"]`; `config["database"]["dsn"]`) unless passed as `tables=` / `dsn=` |
+
+`login_failure` is the one module that reads `tables` and `dsn` out of the
+whole `config` rather than taking them as arguments, because
+`handle_login_failure(errors, config, ...)` is already called by every bot
+with `config` only. Both new tables keys are optional and never raise when
+absent (unlike `tables["suppliers"]` below).
 
 Graph credentials are never hardcoded in this package. A caller that omits
 `tenant_id`, `client_id`, or `client_secret` gets a `ValueError`.
@@ -574,11 +587,13 @@ retried. Raises `TimeoutError` when `timeout_s` elapses with no code. A message
 that matches the subject but contains no digit group is skipped rather than
 accepted, so polling continues.
 
-### 3.7a `login_failure` - uniform login-failure handling (0.13.7; SystemsLink recipient 0.13.11)
+### 3.7a `login_failure` - uniform login-failure handling (0.13.7; SystemsLink recipient 0.13.11; toolkit reporting 0.14.0)
 
 ```python
 class LoginFailureKind(StrEnum):
-    CREDENTIALS_REJECTED, ACCOUNT_LOCKED, PASSWORD_CHANGE_REQUIRED, OTHER
+    CREDENTIALS_REJECTED, ACCOUNT_LOCKED, PASSWORD_CHANGE_REQUIRED,
+    OTP_NOT_RECEIVED,  # 0.14.0; set by the bot, never by classify_portal_message()
+    OTHER
 classify_portal_message(text: str | None) -> LoginFailureKind
 escalate(current, new) -> LoginFailureKind
 handle_login_failure(errors, config: dict, *, supplier_name: str, job_id,
@@ -586,7 +601,24 @@ handle_login_failure(errors, config: dict, *, supplier_name: str, job_id,
                      kind=None, username: str | None = None,
                      portal_url: str | None = None, client_name: str | None = None,
                      team_alert: bool = True,
-                     screenshot: str | Path | None = None) -> bool
+                     screenshot: str | Path | None = None,
+                     process_id=None, multi_credential: bool | None = None,
+                     tables: dict | None = None, dsn: str | None = None) -> bool
+
+# 0.14.0
+@dataclass(frozen=True)
+class LoginFailureReport:
+    failure_id: int | None
+    paused: bool
+    has_owner: bool
+report_login_failure(config: dict, *, job_id, kind, detail: str | None = None,
+                     username: str | None = None, portal_url: str | None = None,
+                     screenshot: str | Path | None = None, process_id=None,
+                     multi_credential: bool = False,
+                     tables: dict | None = None, dsn: str | None = None
+                     ) -> LoginFailureReport | None
+report_login_success(config: dict, *, job_id, process_id=None,
+                     tables: dict | None = None, dsn: str | None = None) -> bool
 ```
 
 `screenshot` (0.13.12) is the path `browser_helpers.take_error_screenshot()`
@@ -614,6 +646,84 @@ Suppliers set `_login_failure_kind` from `classify_portal_message()` on text
 the portal displayed on its login page, combined across retries with
 `escalate()`, or explicitly from a dedicated check (an invalid-credentials
 banner, a forced password-change page). Never from exception text.
+
+#### Reporting to inse-toolkit (0.14.0)
+
+Login failures are being diverted from team alerts and SystemsLink emails to
+the inse-toolkit web app, which pauses job creation for the service and lets
+the service's named owners fix the login. Two stored procedures do the work.
+They are owned by inse-toolkit, not this library, and exist on
+`Titan_INSE_DEV` only so far:
+
+```
+spODC_ReportLoginFailure
+    @job_id INT, @kind VARCHAR(40), @detail NVARCHAR(1000) = NULL,
+    @username NVARCHAR(100) = NULL, @portal_url NVARCHAR(300) = NULL,
+    @screenshot_path NVARCHAR(500) = NULL, @process_id INT = NULL,
+    @multi_credential BIT = 0,
+    @failure_id INT OUTPUT, @paused BIT OUTPUT, @has_owner BIT OUTPUT
+spODC_ReportLoginSuccess
+    @job_id INT, @process_id INT = NULL, @resolved BIT OUTPUT
+```
+
+Config: two optional keys in the per-env tables dict, `report_login_failure`
+and `report_login_success`, each a fully qualified procedure name. A missing
+or blank key means "not configured": no database call, no error, and
+behaviour identical to 0.13.12. The tables dict is `tables=` if passed, else
+`config["tables"]["live"]` when `config["env"]` is `prod` or `live` and
+`config["tables"]["dev"]` otherwise (the same choice every bot's `main.py`
+makes). The DSN is `dsn=` if passed, else `config["database"]["dsn"]`. A key
+that is set with no DSN available logs a warning and counts as not
+configured.
+
+`report_login_failure()` records the failure and returns
+`LoginFailureReport`, or None when not configured. `kind` is sent as the
+`LoginFailureKind` string. For a credential kind on a single-credential
+service the procedure pauses job creation for that client + supplier service
+(`paused`). `has_owner` means the service has named owners in the toolkit,
+whom the toolkit emails. `detail` is cut to 1000 characters, `username` to
+100, `portal_url` to 300, and `screenshot` is stored as its path string (UNC
+form, via `to_unc()`), cut to 500. `job_id` and `process_id` are bound as
+integers (`process_id` that is not a number is sent as NULL). The password is
+never passed or logged. Raises on a database error, a non-numeric `job_id`, or
+a procedure name with characters other than letters, digits, `_`, `.`, `[`
+and `]`.
+
+`handle_login_failure()` calls it straight after the ERROR log line, inside a
+try/except, with `multi_credential` resolved as: the keyword if given, else
+`not team_alert` (bots call it per failed credential with `team_alert=False`
+in a multi-credential loop), or True when `row`'s job-level login is the
+`multi_credential` sentinel. Then:
+
+- Report succeeded, `paused`, `has_owner`, the kind is in
+  `CLIENT_NOTIFIABLE_KINDS`, and not multi-credential: the toolkit owns the
+  failure. No SystemsLink email, no cooldown marker, no `errors.add()`. One
+  INFO line says the failure was recorded as failure id N, the service is
+  paused and its owners will be notified by the toolkit. Returns False.
+- Anything else (not configured, no owner, not paused, `OTHER`,
+  multi-credential): the rules above apply unchanged.
+- The report call raised: the rules above apply unchanged, the exception is
+  logged, and the team also gets `errors.add("<supplier> login failure for
+  job <id> could not be recorded for the toolkit", exception=exc)`, so they
+  know the diversion failed.
+
+`report_login_success()` calls `spODC_ReportLoginSuccess`, which resolves any
+open failure for the job's service and clears the pause, and is a cheap no-op
+otherwise. Returns True when a failure was resolved. Returns False without a
+database call when not configured. Never raises: an error is logged as a
+warning and returns False. A single-credential bot should call it once, right
+after a successful login.
+
+Both calls go through `db.run()` (§3.11), so a transient SQLSTATE is retried.
+The procedures return only OUTPUT parameters, which pyodbc cannot read
+directly, so each call is one batch that declares the outputs, runs `EXEC`
+with named parameters, and selects the outputs back as one row. Only `str`,
+`int` and `None` are bound, and the unit commits.
+
+The bots are not updated yet. Each bot needs the two tables keys in its
+`config.yaml` (the `dev` block only for now) and a `report_login_success()`
+call after login. Until a bot calls it, the toolkit infers a passed test from
+the test job's results.
 
 ### 3.7b `password_change` - forced password-change detection (0.13.11)
 
