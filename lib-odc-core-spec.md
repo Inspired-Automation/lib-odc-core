@@ -587,7 +587,16 @@ retried. Raises `TimeoutError` when `timeout_s` elapses with no code. A message
 that matches the subject but contains no digit group is skipped rather than
 accepted, so polling continues.
 
-### 3.7a `login_failure` - uniform login-failure handling (0.13.7; SystemsLink recipient 0.13.11; toolkit reporting 0.14.0)
+### 3.7a `login_failure` - uniform login-failure handling (0.13.7; SystemsLink recipient 0.13.11; toolkit reporting 0.14.0, moved to the Control Room 0.14.1)
+
+**0.14.1 supersedes the toolkit-reporting parts of this section.** `report_login_failure()` and
+`report_login_success()` are no-ops and `handle_login_failure()` does not call them. It always
+`errors.add()`s a job-level failure with `details=failure_details(...)` (`source`, `category`,
+`kind`, `odc_job_id`, `supplier`, `client`, `username`, `portal_url`, `screenshot`,
+`multi_credential`, `process_id`, `detail`), and reports each owner-fixable failed login of a
+multi-credential job (`team_alert=False`) naming it. `category_for(kind)` maps kinds to the
+Control Room's categories: `login_error`, `otp_not_received`, `recaptcha_not_completed`
+(`LoginFailureKind.RECAPTCHA_NOT_COMPLETED`, new), `other`.
 
 ```python
 class LoginFailureKind(StrEnum):

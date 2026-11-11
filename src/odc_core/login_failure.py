@@ -38,52 +38,33 @@ knows which page text is a portal message and which is an exception string.
 across retries. Never classify exception text: Playwright errors quote the
 selector they were waiting on, which can itself read "password invalid".
 
-Toolkit reporting (0.14.0)
---------------------------
-Login failures are being diverted from team alerts and SystemsLink emails to
-the inse-toolkit web app. When the per-env tables dict carries the optional
-``report_login_failure`` key, ``handle_login_failure()`` first records the
-failure through that stored procedure (``spODC_ReportLoginFailure``, via
-``report_login_failure()``). For a credential kind on a single-credential
-service the procedure pauses job creation for that client + supplier service,
-and when the service has named owners the toolkit emails them. In that case
-(paused, has an owner, credential kind, not multi-credential) the toolkit owns
-the failure: no SystemsLink email, no ``errors.add()``, one INFO line, and
-``handle_login_failure()`` returns False. In every other case (key absent,
-no owner, ``OTHER`` kind, multi-credential, or the report call failed) steps
-2 and 3 above run exactly as in 0.13.12; a report call that raised is also
-reported to the team with its own ``errors.add()``.
+Control Room triage (0.14.1)
+----------------------------
+The Control Room's failure triage now decides what a failed run was and hands
+inse-toolkit the failures a business owner can fix; the toolkit pauses the
+service (or switches off one login of several) and tells the owner. So the
+bot's job is to give the Control Room a failure it can triage, every time:
 
-``report_login_success()`` calls ``spODC_ReportLoginSuccess`` (tables key
-``report_login_success``), which resolves any open failure for the job's
-service and clears the pause. A single-credential bot should call it once,
-right after a successful login. Until a bot does, the toolkit infers a passed
-test from the test job's results.
-
-Both keys are optional. A missing or blank key means "not configured": no
-database call, and behaviour identical to 0.13.12. The procedures exist on
-``Titan_INSE_DEV`` only so far, so only the ``dev`` block should carry them::
-
-    tables:
-      dev:
-        report_login_failure: Titan_INSE_DEV.dbo.spODC_ReportLoginFailure
-        report_login_success: Titan_INSE_DEV.dbo.spODC_ReportLoginSuccess
-
-The tables dict and DSN come from ``config`` (``config["tables"]["live"]``
-when ``config["env"]`` is prod or live, else ``["dev"]``;
-``config["database"]["dsn"]``) unless passed as ``tables=`` / ``dsn=``.
-The password is never passed to either procedure or logged.
-
-Config (all optional; defaults shown)::
-
-    login_failure_notification:
-      enabled: true
-      recipient: support@systems-link.com
-      sender_address: noreply_automation@inspiredenergy.co.uk
-      reply_to: ""               # optional Reply-To; none by default
-      cooldown_hours: 24
-      dev_recipient: ""          # dev runs email only this address, if set
-      state_dir: ""              # default {pdf_auto.base_path}\\{LIVE|DEV}\\LOGIN_FAILURE_NOTICES
+- ``handle_login_failure()`` always calls ``errors.add()`` for a job-level
+  failure, including when SystemsLink was emailed (0.13.x stayed silent
+  then). The message is unchanged; ``details`` carries the fields triage
+  needs: ``category`` (``login_error`` / ``otp_not_received`` /
+  ``recaptcha_not_completed`` / ``other``, from ``category_for()``), ``kind``,
+  ``odc_job_id``, ``supplier``, ``client``, ``username``, ``portal_url``,
+  ``screenshot``, ``multi_credential``, ``process_id`` and ``detail``.
+- On a multi-credential job, a single failed login is reported too
+  (``team_alert=False`` with an owner-fixable kind), naming the login, so the
+  toolkit can switch off just that one. 0.14.0 said nothing until every login
+  had failed.
+- The bot no longer writes to the database itself. ``report_login_failure()``
+  and ``report_login_success()`` (0.14.0) are kept so callers do not break,
+  but do nothing: with both the bot and the Control Room reporting, every
+  failure would be counted twice. The tables keys ``report_login_failure`` /
+  ``report_login_success`` are ignored.
+- The SystemsLink email is unchanged and still on by default. inse-toolkit
+  emails SystemsLink as the service's owner once it is live for a service, so
+  turn this off then (``login_failure_notification.enabled: false``) or they
+  are told twice.
 """
 from __future__ import annotations
 
@@ -100,7 +81,7 @@ from typing import Any
 from file_allocation_core.routing import is_inspired_client
 from file_allocation_core.unc import to_unc
 
-from . import db, graph_client, jobstodo
+from . import graph_client, jobstodo
 
 logger = logging.getLogger(__name__)
 
@@ -117,12 +98,32 @@ class LoginFailureKind(StrEnum):
     #: (it knows when it is waiting for an OTP), never by
     #: classify_portal_message().
     OTP_NOT_RECEIVED = "otp not received"
+    #: 0.14.1. A human-assisted login (reCAPTCHA) that nobody completed before
+    #: the wait ran out. Not a credential problem: the Control Room sends a
+    #: notification, nothing is paused. Set by the bot.
+    RECAPTCHA_NOT_COMPLETED = "recaptcha not completed"
     OTHER = "other"
 
 
 #: Kinds the client can fix themselves, so the only ones SystemsLink is
 #: emailed about (to pass on to the client).
 CLIENT_NOTIFIABLE_KINDS = frozenset({
+    LoginFailureKind.CREDENTIALS_REJECTED,
+    LoginFailureKind.ACCOUNT_LOCKED,
+    LoginFailureKind.PASSWORD_CHANGE_REQUIRED,
+    LoginFailureKind.OTP_NOT_RECEIVED,
+})
+
+#: The Control Room's triage categories (0.14.1). inse-toolkit acts on the
+#: first two; the Control Room keeps the rest.
+CATEGORY_LOGIN_ERROR = "login_error"
+CATEGORY_OTP_NOT_RECEIVED = "otp_not_received"
+CATEGORY_RECAPTCHA_NOT_COMPLETED = "recaptcha_not_completed"
+CATEGORY_OTHER = "other"
+
+#: Kinds a business owner can put right, so the ones worth reporting login by
+#: login on a multi-credential job.
+OWNER_FIXABLE_KINDS = frozenset({
     LoginFailureKind.CREDENTIALS_REJECTED,
     LoginFailureKind.ACCOUNT_LOCKED,
     LoginFailureKind.PASSWORD_CHANGE_REQUIRED,
@@ -174,6 +175,7 @@ _PORTAL_PATTERNS: tuple[tuple[LoginFailureKind, re.Pattern[str]], ...] = (
 
 _KIND_RANK = {
     LoginFailureKind.OTHER: 0,
+    LoginFailureKind.RECAPTCHA_NOT_COMPLETED: 0,
     # Below the password kinds: an OTP is only asked for once the password
     # was accepted, so a "password incorrect" seen on any attempt wins.
     LoginFailureKind.OTP_NOT_RECEIVED: 1,
@@ -181,6 +183,18 @@ _KIND_RANK = {
     LoginFailureKind.ACCOUNT_LOCKED: 3,
     LoginFailureKind.PASSWORD_CHANGE_REQUIRED: 4,
 }
+
+
+def category_for(kind: LoginFailureKind | str | None) -> str:
+    """The Control Room triage category for a failure kind (0.14.1)."""
+    kind = _as_kind(kind)
+    if kind == LoginFailureKind.OTP_NOT_RECEIVED:
+        return CATEGORY_OTP_NOT_RECEIVED
+    if kind == LoginFailureKind.RECAPTCHA_NOT_COMPLETED:
+        return CATEGORY_RECAPTCHA_NOT_COMPLETED
+    if kind in OWNER_FIXABLE_KINDS:
+        return CATEGORY_LOGIN_ERROR
+    return CATEGORY_OTHER
 
 
 def classify_portal_message(text: str | None) -> LoginFailureKind:
@@ -453,62 +467,21 @@ def notify_client(
 
 
 #: Optional keys in the per-env tables dict naming the two toolkit procedures.
+#: Tables keys 0.14.0 read to find the inse-toolkit procedures. Ignored since
+#: 0.14.1 (the Control Room reports for the bot); named so a config that still
+#: has them is recognisably harmless.
 REPORT_FAILURE_KEY = "report_login_failure"
 REPORT_SUCCESS_KEY = "report_login_success"
-
-_PROC_NAME_RE = re.compile(r"^[A-Za-z0-9_.\[\]]+$")
-
-# Both procedures return nothing but OUTPUT parameters, which pyodbc cannot
-# read directly: declare them in the batch and SELECT them back as one row.
-_REPORT_FAILURE_SQL = (
-    "SET NOCOUNT ON; "
-    "DECLARE @f INT, @p BIT, @o BIT; "
-    "EXEC {proc} @job_id = ?, @kind = ?, @detail = ?, @username = ?, @portal_url = ?, "
-    "@screenshot_path = ?, @process_id = ?, @multi_credential = ?, "
-    "@failure_id = @f OUTPUT, @paused = @p OUTPUT, @has_owner = @o OUTPUT; "
-    "SELECT @f, @p, @o;"
-)
-
-_REPORT_SUCCESS_SQL = (
-    "SET NOCOUNT ON; "
-    "DECLARE @r BIT; "
-    "EXEC {proc} @job_id = ?, @process_id = ?, @resolved = @r OUTPUT; "
-    "SELECT @r;"
-)
 
 
 @dataclass(frozen=True)
 class LoginFailureReport:
-    """What ``spODC_ReportLoginFailure`` said about a recorded failure."""
+    """What ``spODC_ReportLoginFailure`` said about a recorded failure (0.14.0).
+    Nothing returns one since 0.14.1; kept for callers that import the name."""
 
     failure_id: int | None
     paused: bool
     has_owner: bool
-
-
-def _report_target(config: dict, key: str, tables: dict | None, dsn: str | None) -> tuple[str, str] | None:
-    """Return ``(procedure, dsn)`` for a toolkit procedure, or None when it is
-    not configured. A missing key or block is never an error."""
-    config = config or {}
-    if tables is None:
-        env = str(config.get("env") or "dev").lower()
-        by_env = config.get("tables")
-        tables = by_env.get("live" if env in ("prod", "live") else "dev") if isinstance(by_env, dict) else None
-    if not isinstance(tables, dict):
-        return None
-    proc = str(tables.get(key) or "").strip()
-    if not proc:
-        return None
-    if dsn is None:
-        database = config.get("database")
-        dsn = database.get("dsn") if isinstance(database, dict) else None
-    dsn = str(dsn or "").strip()
-    if not dsn:
-        logger.warning("LOGIN_FAILURE - tables.%s is set but there is no database dsn; not calling it", key)
-        return None
-    if not _PROC_NAME_RE.match(proc):
-        raise ValueError(f"LOGIN_FAILURE - tables.{key} is not a valid procedure name: {proc!r}")
-    return proc, dsn
 
 
 def _int_or_none(value: Any) -> int | None:
@@ -521,14 +494,6 @@ def _int_or_none(value: Any) -> int | None:
 def _clip(value: Any, length: int) -> str | None:
     text = str(value).strip() if value is not None else ""
     return text[:length] if text else None
-
-
-def _first_row(cursor: Any) -> Any:
-    # Skip any rowcount-only results ahead of the final SELECT.
-    while cursor.description is None:
-        if not cursor.nextset():
-            return None
-    return cursor.fetchone()
 
 
 def report_login_failure(
@@ -545,56 +510,14 @@ def report_login_failure(
     tables: dict | None = None,
     dsn: str | None = None,
 ) -> LoginFailureReport | None:
-    """Record a failed login for the inse-toolkit (0.14.0).
+    """Does nothing since 0.14.1; kept so 0.14.0 callers do not break.
 
-    Calls the procedure named by the optional tables key
-    ``report_login_failure`` (``spODC_ReportLoginFailure``). Returns None, with
-    no database call, when that key is missing or blank. Otherwise returns a
-    ``LoginFailureReport``: ``paused`` is True when job creation for the job's
-    client + supplier service is now paused (a credential kind on a
-    single-credential service), and ``has_owner`` is True when the service has
-    named owners, whom the toolkit emails.
-
-    ``tables`` / ``dsn`` default to ``config["tables"][live|dev]`` (by
-    ``config["env"]``) and ``config["database"]["dsn"]``. ``screenshot`` is
-    stored as its path (UNC form), not attached. ``detail`` is cut to 1000
-    characters, ``username`` to 100, ``portal_url`` to 300 and the screenshot
-    path to 500. The password is never passed. Raises on a database error or a
-    non-numeric ``job_id``; callers that must not fail use
-    ``handle_login_failure()``.
+    0.14.0 recorded the failure for inse-toolkit by calling
+    ``spODC_ReportLoginFailure``. The Control Room's failure triage does that
+    now, so a bot that also did it would count every failure twice. Always
+    returns None, with no database call, whatever the tables key says.
     """
-    target = _report_target(config, REPORT_FAILURE_KEY, tables, dsn)
-    if target is None:
-        return None
-    proc, dsn = target
-    job = _int_or_none(job_id)
-    if job is None:
-        raise ValueError(f"LOGIN_FAILURE - job_id {job_id!r} is not a number; cannot report the failure")
-    params = (
-        job,
-        str(_as_kind(kind)),
-        _clip(detail, 1000),
-        _clip(username, 100),
-        _clip(portal_url, 300),
-        _clip(to_unc(str(screenshot)), 500) if screenshot else None,
-        _int_or_none(process_id),
-        1 if multi_credential else 0,
-    )
-    sql = _REPORT_FAILURE_SQL.format(proc=proc)
-
-    def work(conn) -> LoginFailureReport:
-        cursor = conn.cursor()
-        cursor.execute(sql, *params)
-        row = _first_row(cursor)
-        conn.commit()
-        if row is None:
-            raise RuntimeError(f"LOGIN_FAILURE - {proc} returned no output row for job {job}")
-        return LoginFailureReport(
-            failure_id=_int_or_none(row[0]), paused=bool(row[1]), has_owner=bool(row[2]),
-        )
-
-    # Replaying is safe: a transient SQLSTATE means nothing was committed.
-    return db.run(dsn, work, description=f"login_failure.report_login_failure({job})")
+    return None
 
 
 def report_login_success(
@@ -605,49 +528,60 @@ def report_login_success(
     tables: dict | None = None,
     dsn: str | None = None,
 ) -> bool:
-    """Tell the inse-toolkit a login succeeded (0.14.0).
+    """Does nothing since 0.14.1; kept so 0.14.0 callers do not break.
 
-    Calls the procedure named by the optional tables key
-    ``report_login_success`` (``spODC_ReportLoginSuccess``), which resolves any
-    open failure for the job's client + supplier service and clears its pause;
-    it is a cheap no-op when there is none. Returns True when a failure was
-    resolved. Returns False, with no database call, when the key is missing or
-    blank. Never raises: an error is logged as a warning and returns False.
-
-    A single-credential bot should call this once, right after a successful
-    login. ``tables`` / ``dsn`` resolve as in ``report_login_failure()``.
+    0.14.0 told inse-toolkit a login succeeded by calling
+    ``spODC_ReportLoginSuccess``. That now goes through the Control Room, like
+    failures. Always returns False, with no database call.
     """
+    return False
+
+
+def failure_details(
+    *,
+    supplier_name: str,
+    job_id: Any,
+    kind: LoginFailureKind | str | None,
+    detail: str | None = None,
+    username: str | None = None,
+    portal_url: str | None = None,
+    client_name: str | None = None,
+    screenshot: str | Path | None = None,
+    process_id: Any = None,
+    multi_credential: bool = False,
+) -> dict:
+    """The ``details`` block sent to the Control Room with a login failure
+    (0.14.1): everything its triage needs as fields, never the password.
+    ``username`` is the login that failed, which is what lets inse-toolkit
+    switch off one login of a multi-credential service."""
+    kind = _as_kind(kind)
+    job = _int_or_none(job_id)
+    return {
+        "source": "odc_login_failure",
+        "category": category_for(kind),
+        "kind": str(kind),
+        "odc_job_id": job if job is not None else (str(job_id) if job_id is not None else None),
+        "supplier": supplier_name,
+        "client": _clip(client_name, 300),
+        "username": _clip(username, 100),
+        "portal_url": _clip(portal_url, 300),
+        "screenshot": _clip(to_unc(str(screenshot)), 500) if screenshot else None,
+        "multi_credential": bool(multi_credential),
+        "process_id": _int_or_none(process_id),
+        "detail": _clip(detail, 1000),
+    }
+
+
+def _add_error(errors: Any, message: str, *, details: dict | None = None, exception: Exception | None = None) -> None:
+    """``errors.add()``, falling back to a call without ``details`` for an
+    automation_core too old to take it. A login failure must still be reported."""
+    kwargs: dict = {}
+    if exception is not None:
+        kwargs["exception"] = exception
     try:
-        target = _report_target(config, REPORT_SUCCESS_KEY, tables, dsn)
-        if target is None:
-            return False
-        proc, dsn = target
-        job = _int_or_none(job_id)
-        if job is None:
-            raise ValueError(f"job_id {job_id!r} is not a number")
-        params = (job, _int_or_none(process_id))
-        sql = _REPORT_SUCCESS_SQL.format(proc=proc)
-
-        def work(conn) -> bool:
-            cursor = conn.cursor()
-            cursor.execute(sql, *params)
-            row = _first_row(cursor)
-            conn.commit()
-            return bool(row[0]) if row is not None else False
-
-        resolved = db.run(dsn, work, description=f"login_failure.report_login_success({job})")
-    except Exception:
-        logger.warning(
-            "LOGIN_FAILURE - could not report the successful login for job %s to the toolkit",
-            job_id, exc_info=True,
-        )
-        return False
-    if resolved:
-        logger.info(
-            "LOGIN_FAILURE - login succeeded for job %s; the open login failure for its service "
-            "is resolved and job creation is no longer paused", job_id,
-        )
-    return resolved
+        errors.add(message, details=details, **kwargs)
+    except TypeError:
+        errors.add(message, **kwargs)
 
 
 def handle_login_failure(
@@ -671,36 +605,33 @@ def handle_login_failure(
 ) -> bool:
     """The single login-failure path for every supplier bot.
 
-    0.14.0: when the tables key ``report_login_failure`` is set, the failure
-    is first recorded for the inse-toolkit (``report_login_failure()``,
-    passing ``process_id``, ``tables`` and ``dsn`` through). If that pauses the
-    service, the service has an owner, the kind is a credential kind and this
-    is not a multi-credential failure, the toolkit owns it: no SystemsLink
-    email, no ``errors.add()``, and the return value is False. Otherwise
-    everything below applies unchanged, and a report call that raised is
-    logged and reported to the team as its own error. ``multi_credential``
-    None (the default) means ``not team_alert``, or a ``row`` whose job-level
-    login is the ``multi_credential`` sentinel.
+    Logs one ERROR line, emails SystemsLink when ``notify_client()``'s rules
+    allow, and reports the failure to the Control Room through
+    ``errors.add()`` with a ``details`` block (``failure_details()``) its
+    failure triage reads. Never raises: a failed notice email is logged and
+    reported as its own error.
 
-    ``screenshot`` (0.13.12): the path ``browser_helpers.take_error_screenshot()``
-    returned for the failed page. Attached to the SystemsLink notice when the
-    file exists; the email only mentions it when it is attached.
-
-    Logs, and emails SystemsLink when ``notify_client()``'s rules allow;
-    otherwise raises the team alert through ``errors.add()``. A failure
-    SystemsLink is notified about (or was, within the cooldown) gets no team
-    alert. Never raises: a failed notice email is logged and reported to the
-    team as its own error, alongside the team alert.
+    0.14.1: the Control Room is always told about a job-level failure, even
+    when SystemsLink was emailed (0.13.x stayed silent then), because its
+    triage is what hands the failure to inse-toolkit. The bot no longer
+    records anything in the database itself; ``tables`` and ``dsn`` are
+    accepted and ignored.
 
     ``row`` is the job-level row (any ``get_job_details()`` row); ``username``,
     ``portal_url`` and ``client_name`` override its values - multi-credential
-    bots pass the credential that failed. Returns True if SystemsLink was emailed.
+    bots pass the credential that failed. ``screenshot`` (0.13.12) is the path
+    ``browser_helpers.take_error_screenshot()`` returned; it is attached to
+    the SystemsLink notice when the file exists and its path is sent to the
+    Control Room. Returns True if SystemsLink was emailed.
 
-    ``team_alert=False`` skips the ``errors.add()`` (still logs and still
-    emails SystemsLink). For a multi-credential job, where one credential
-    failing is not a job failure: call it per failed credential with
-    ``team_alert=False``, then once with the default when every credential
-    has failed.
+    ``team_alert=False`` is for a multi-credential job, where one login
+    failing is not the job failing: call it per failed login with
+    ``team_alert=False``, then once with the default when every login has
+    failed. 0.14.1: a per-login call with an owner-fixable kind is still
+    reported to the Control Room, naming the login, so that one login can be
+    switched off; a per-login ``OTHER`` stays quiet as before.
+    ``multi_credential`` None (the default) means ``not team_alert``, or a
+    ``row`` whose job-level login is the ``multi_credential`` sentinel.
     """
     row = row or {}
     kind = _as_kind(kind)
@@ -717,44 +648,9 @@ def handle_login_failure(
         multi = (not team_alert) or jobstodo.is_multi_credential_job(row.get("username"), row.get("password"))
     else:
         multi = bool(multi_credential)
-    report: LoginFailureReport | None = None
-    report_error: Exception | None = None
-    try:
-        report = report_login_failure(
-            config, job_id=job_id, kind=kind, detail=detail, username=login, portal_url=url,
-            screenshot=screenshot, process_id=process_id, multi_credential=multi,
-            tables=tables, dsn=dsn,
-        )
-    except Exception as exc:
-        logger.exception("LOGIN_FAILURE - could not record the login failure for job %s for the toolkit", job_id)
-        report_error = exc
-
-    if report is not None and report.paused and report.has_owner and kind in CLIENT_NOTIFIABLE_KINDS and not multi:
-        logger.info(
-            "LOGIN_FAILURE - job %s recorded for the toolkit as failure id %s; the service is paused "
-            "and its owners will be notified by the toolkit (no SystemsLink notice, no team alert)",
-            job_id, report.failure_id,
-        )
-        return False
-
-    # The procedure records a first OTP miss without pausing (one late email
-    # is not a login problem) and pauses on a second miss in a row. Until
-    # then the toolkit holds the record, so nobody else is told either.
-    if (report is not None and not report.paused and report.has_owner
-            and kind == LoginFailureKind.OTP_NOT_RECEIVED and not multi):
-        logger.warning(
-            "LOGIN_FAILURE - job %s: OTP not received, recorded for the toolkit as failure id %s; "
-            "a second miss on the next run pauses the service and notifies its owners "
-            "(no SystemsLink notice, no team alert)",
-            job_id, report.failure_id,
-        )
-        return False
-
-    recipient = None
     sent = False
     email_error: Exception | None = None
     try:
-        recipient, _ = client_notice_recipient(config, client_name=client, username=login, kind=kind)
         sent = notify_client(
             config,
             supplier_name=supplier_name,
@@ -769,18 +665,19 @@ def handle_login_failure(
         logger.exception("LOGIN_FAILURE - could not email the SystemsLink notice about job %s", job_id)
         email_error = exc
 
-    # SystemsLink own getting the client to fix it once they are notified
-    # (now, or within the cooldown), so the team is not alerted. Everything
-    # else - Inspired PLC / Ignite, our-side faults, a failed send - still is.
-    client_handles_it = recipient is not None and email_error is None
-    if team_alert and not client_handles_it:
-        errors.add(f"{supplier_name} login failed for job {job_id} ({kind}): {text}")
+    # The Control Room triages every failure, so it is always told: the job
+    # failing, and on a multi-credential job each login an owner can fix.
+    if team_alert or (multi and kind in OWNER_FIXABLE_KINDS):
+        details = failure_details(
+            supplier_name=supplier_name, job_id=job_id, kind=kind, detail=detail,
+            username=login, portal_url=url, client_name=client, screenshot=screenshot,
+            process_id=process_id, multi_credential=multi,
+        )
+        _add_error(errors, f"{supplier_name} login failed for job {job_id} ({kind}): {text}", details=details)
     if email_error is not None:
-        errors.add(f"{supplier_name} login-failure notice to SystemsLink failed for job {job_id}", exception=email_error)
-    if report_error is not None:
-        errors.add(
-            f"{supplier_name} login failure for job {job_id} could not be recorded for the toolkit",
-            exception=report_error,
+        _add_error(
+            errors, f"{supplier_name} login-failure notice to SystemsLink failed for job {job_id}",
+            exception=email_error,
         )
     return sent
 

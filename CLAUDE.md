@@ -92,7 +92,8 @@ entry point of its own.
   read-only: `Titan_INSE.dbo.TOOLKIT_PORTAL_SCRAPE_ASSIST_RUN` and
   `TOOLKIT_USER`. They are owned by inse-toolkit, and live on `Titan_INSE`
   even for DEV runs.
-- `login_failure` (0.14.0) calls two inse-toolkit stored procedures,
+- `login_failure` (0.14.0) called two inse-toolkit stored procedures; since 0.14.1 it calls
+  none (the Control Room reports to the toolkit). Historical note:
   `spODC_ReportLoginFailure` and `spODC_ReportLoginSuccess`, named by the
   optional tables keys `report_login_failure` / `report_login_success`.
   They are owned by inse-toolkit and exist on `Titan_INSE_DEV` only so far.
@@ -387,6 +388,16 @@ entry point of its own.
   entry.
 
 ## Change Log
+- 2026-11-11: v0.14.1 - PATCH. The Control Room's failure triage now hands login failures
+  to inse-toolkit, so the bot stops doing it: `report_login_failure()` /
+  `report_login_success()` (0.14.0) are no-ops and `handle_login_failure()` no longer calls
+  them. Instead `handle_login_failure()` always `errors.add()`s a job-level failure (even when
+  SystemsLink was emailed) with `details=failure_details(...)` - category, kind, odc_job_id,
+  username, screenshot path and so on, never the password - and reports each owner-fixable
+  failed login of a multi-credential job, naming it. New `LoginFailureKind.RECAPTCHA_NOT_COMPLETED`
+  and `category_for()`. SystemsLink email unchanged (turn it off per bot at the toolkit
+  switch-over). 330 tests pass (with lib-file-allocation's src on PYTHONPATH: the installed
+  `file_allocation_core` on this machine lacks `unc`).
 - 2026-11-10: v0.14.0 - MINOR, additive. Login failures are being diverted
   to inse-toolkit, which pauses job creation for the service and lets the
   service's named owners fix the login. New

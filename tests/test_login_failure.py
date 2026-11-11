@@ -225,14 +225,14 @@ def test_handle_missing_screenshot_sends_without(mock_send, tmp_path):
 # --- notify_client / handle_login_failure -------------------------------------
 
 @patch("odc_core.login_failure.graph_client.send_mail")
-def test_handle_emails_systemslink_without_team_alert(mock_send, tmp_path):
+def test_handle_emails_systemslink_and_tells_the_control_room(mock_send, tmp_path):
     errors = MagicMock()
     sent = login_failure.handle_login_failure(
         errors, _config(tmp_path), supplier_name="EDF Energy", job_id=42,
         row=ROW, detail="Invalid username or password", kind=K.CREDENTIALS_REJECTED,
     )
     assert sent is True
-    errors.add.assert_not_called()
+    errors.add.assert_called_once()  # 0.14.1: the Control Room is always told
     args, kwargs = mock_send.call_args
     assert args[1] == "support@systems-link.com"
     assert kwargs["reply_to"] is None
@@ -267,7 +267,7 @@ def test_handle_non_email_login_still_notifies_systemslink(mock_send, tmp_path):
         row={**ROW, "username": "acme123"}, detail="Invalid password", kind=K.CREDENTIALS_REJECTED,
     )
     assert sent is True
-    errors.add.assert_not_called()
+    errors.add.assert_called_once()  # 0.14.1: the Control Room is always told
     assert mock_send.call_args.args[1] == "support@systems-link.com"
     assert "Account login: acme123" in mock_send.call_args.args[3]
 
@@ -281,7 +281,7 @@ def test_handle_password_change_notifies_systemslink(mock_send, tmp_path):
         kind=K.PASSWORD_CHANGE_REQUIRED,
     )
     assert sent is True
-    errors.add.assert_not_called()
+    errors.add.assert_called_once()  # 0.14.1: the Control Room is always told
     args, _ = mock_send.call_args
     assert args[1] == "support@systems-link.com"
     assert "ESOS Energy Ltd - TGP Mygateway" in args[2]
@@ -297,7 +297,7 @@ def test_reply_to_set_when_configured(mock_send, tmp_path):
 
 
 @patch("odc_core.login_failure.graph_client.send_mail")
-def test_handle_within_cooldown_no_team_alert(mock_send, tmp_path):
+def test_handle_within_cooldown_emails_once_but_reports_each_time(mock_send, tmp_path):
     cfg = _config(tmp_path)
     for _ in range(2):
         errors = MagicMock()
@@ -305,7 +305,7 @@ def test_handle_within_cooldown_no_team_alert(mock_send, tmp_path):
             errors, cfg, supplier_name="EDF Energy", job_id=1,
             row=ROW, detail="Invalid password", kind=K.CREDENTIALS_REJECTED,
         )
-        errors.add.assert_not_called()
+        errors.add.assert_called_once()  # 0.14.1: the Control Room is always told
     assert mock_send.call_count == 1
 
 
@@ -370,291 +370,164 @@ def test_handle_overrides_for_multi_credential(mock_send, tmp_path):
 
 
 @patch("odc_core.login_failure.graph_client.send_mail")
-def test_team_alert_false_still_emails_systemslink(mock_send, tmp_path):
+def test_team_alert_false_still_emails_systemslink_and_reports_the_login(mock_send, tmp_path):
     errors = MagicMock()
     sent = login_failure.handle_login_failure(
         errors, _config(tmp_path), supplier_name="SFB", job_id=3, row=ROW,
         detail="Invalid password", kind=K.CREDENTIALS_REJECTED, team_alert=False,
     )
     assert sent is True
-    errors.add.assert_not_called()
+    errors.add.assert_called_once()  # 0.14.1: the Control Room is always told
 
 
-# --- toolkit reporting (0.14.0) -----------------------------------------------
+# --- Control Room triage (0.14.1) ---------------------------------------------
 
-FAIL_PROC = "Titan_INSE_DEV.dbo.spODC_ReportLoginFailure"
-OK_PROC = "Titan_INSE_DEV.dbo.spODC_ReportLoginSuccess"
-MULTI_ROW = {**ROW, "username": "multi_credential", "password": "multi_credential"}
-
-
-def _toolkit_config(tmp_path, env="prod", **settings):
-    block = {"jobs": "ODC_jobs", "report_login_failure": FAIL_PROC, "report_login_success": OK_PROC}
-    return {
-        **_config(tmp_path, env=env, **settings),
-        "database": {"dsn": "Jupiter"},
-        "tables": {"dev": dict(block), "live": dict(block)},
-    }
+def _details(errors, call=0):
+    return errors.add.call_args_list[call].kwargs["details"]
 
 
-def _connection(mock_connect, row):
-    cursor = MagicMock()
-    cursor.fetchone.return_value = row
-    conn = MagicMock()
-    conn.cursor.return_value = cursor
-    mock_connect.return_value = conn
-    return conn, cursor
+@pytest.mark.parametrize("kind,category", [
+    (K.CREDENTIALS_REJECTED, "login_error"),
+    (K.ACCOUNT_LOCKED, "login_error"),
+    (K.PASSWORD_CHANGE_REQUIRED, "login_error"),
+    (K.OTP_NOT_RECEIVED, "otp_not_received"),
+    (K.RECAPTCHA_NOT_COMPLETED, "recaptcha_not_completed"),
+    (K.OTHER, "other"),
+    (None, "other"),
+    ("nonsense", "other"),
+])
+def test_category_for(kind, category):
+    assert login_failure.category_for(kind) == category
 
 
-@patch("odc_core.db.pyodbc.connect")
-def test_report_failure_not_configured_makes_no_db_call(mock_connect, tmp_path):
-    for cfg in (
-        _config(tmp_path),
-        {**_config(tmp_path), "database": {"dsn": "Jupiter"}, "tables": {"live": {"jobs": "ODC_jobs"}}},
-        {**_config(tmp_path), "database": {"dsn": "Jupiter"}, "tables": {"live": {"report_login_failure": "  "}}},
-        {**_config(tmp_path), "tables": None},
-    ):
-        assert login_failure.report_login_failure(cfg, job_id=1, kind=K.ACCOUNT_LOCKED) is None
-    mock_connect.assert_not_called()
+def test_recaptcha_is_not_something_systemslink_or_an_owner_fixes():
+    assert K.RECAPTCHA_NOT_COMPLETED not in login_failure.CLIENT_NOTIFIABLE_KINDS
+    assert K.RECAPTCHA_NOT_COMPLETED not in login_failure.OWNER_FIXABLE_KINDS
+    assert login_failure.escalate(K.RECAPTCHA_NOT_COMPLETED, K.CREDENTIALS_REJECTED) == K.CREDENTIALS_REJECTED
 
 
-@patch("odc_core.db.pyodbc.connect")
-def test_report_failure_binds_truncated_values_and_reads_outputs(mock_connect, tmp_path):
-    conn, cursor = _connection(mock_connect, (17, True, False))
-    report = login_failure.report_login_failure(
-        _toolkit_config(tmp_path), job_id="5448", kind=K.PASSWORD_CHANGE_REQUIRED,
-        detail="d" * 1500, username="u" * 150, portal_url="h" * 400,
-        screenshot="C:\\shots\\" + "s" * 600, process_id="21090",
+def test_failure_details_carries_what_triage_needs_and_never_the_password(tmp_path):
+    shot = tmp_path / "login.png"
+    details = login_failure.failure_details(
+        supplier_name="EDF Energy", job_id="5448", kind=K.ACCOUNT_LOCKED, detail="Locked " * 400,
+        username="bills@acme.example", portal_url="https://portal.example", client_name="Acme Ltd",
+        screenshot=shot, process_id="21090", multi_credential=True,
     )
-    assert report == login_failure.LoginFailureReport(failure_id=17, paused=True, has_owner=False)
-    mock_connect.assert_called_once_with("DSN=Jupiter")
-    sql, *params = cursor.execute.call_args.args
-    assert f"EXEC {FAIL_PROC} @job_id = ?" in sql
-    assert "@failure_id = @f OUTPUT" in sql and sql.rstrip().endswith("SELECT @f, @p, @o;")
-    assert params[0] == 5448
-    assert params[1] == "password change required"
-    assert [len(p) for p in params[2:6]] == [1000, 100, 300, 500]
-    assert params[6] == 21090
-    assert params[7] == 0
-    assert all(p is None or type(p) in (str, int) for p in params)
-    conn.commit.assert_called_once()
-    conn.close.assert_called_once()
-
-
-@patch("odc_core.db.pyodbc.connect")
-def test_report_failure_uses_env_block_and_explicit_overrides(mock_connect, tmp_path):
-    _, cursor = _connection(mock_connect, (1, False, False))
-    cfg = _toolkit_config(tmp_path, env="dev")
-    cfg["tables"]["live"] = {"jobs": "ODC_jobs"}
-    assert login_failure.report_login_failure(cfg, job_id=1, kind=K.OTHER) is not None
-    cfg["env"] = "prod"
-    assert login_failure.report_login_failure(cfg, job_id=1, kind=K.OTHER) is None
-    assert mock_connect.call_count == 1
-
-    login_failure.report_login_failure(
-        {}, job_id=2, kind=K.OTHER, tables={"report_login_failure": "db.dbo.other_proc"}, dsn="Other",
-    )
-    mock_connect.assert_called_with("DSN=Other")
-    assert "EXEC db.dbo.other_proc " in cursor.execute.call_args.args[0]
-    assert cursor.execute.call_args.args[3:8] == (None, None, None, None, None)
-
-
-@patch("odc_core.db.pyodbc.connect", side_effect=RuntimeError("db down"))
-def test_report_failure_raises_on_db_error(mock_connect, tmp_path):
-    with pytest.raises(RuntimeError):
-        login_failure.report_login_failure(_toolkit_config(tmp_path), job_id=1, kind=K.ACCOUNT_LOCKED)
+    assert details["source"] == "odc_login_failure"
+    assert details["category"] == "login_error" and details["kind"] == "account locked"
+    assert details["odc_job_id"] == 5448 and details["process_id"] == 21090
+    assert details["username"] == "bills@acme.example" and details["multi_credential"] is True
+    assert details["screenshot"].endswith("login.png")
+    assert len(details["detail"]) == 1000
+    assert "password" not in details
 
 
 @patch("odc_core.login_failure.graph_client.send_mail")
-@patch("odc_core.db.pyodbc.connect")
-def test_handle_not_configured_keeps_old_behaviour(mock_connect, mock_send, tmp_path):
+def test_handle_always_tells_the_control_room_even_when_systemslink_is_emailed(mock_send, tmp_path):
     errors = MagicMock()
     sent = login_failure.handle_login_failure(
         errors, _config(tmp_path), supplier_name="EDF Energy", job_id=42,
-        row=ROW, detail="Invalid username or password", kind=K.CREDENTIALS_REJECTED, process_id=9,
+        row=ROW, detail="Invalid password", kind=K.CREDENTIALS_REJECTED, process_id=777,
     )
     assert sent is True
-    mock_connect.assert_not_called()
-    mock_send.assert_called_once()
-    errors.add.assert_not_called()
+    assert mock_send.call_args.args[1] == "support@systems-link.com"
+    errors.add.assert_called_once()
+    assert "EDF Energy login failed for job 42 (credentials rejected)" in errors.add.call_args.args[0]
+    details = _details(errors)
+    assert details["category"] == "login_error" and details["odc_job_id"] == 42
+    assert details["username"] == ROW["username"] and details["process_id"] == 777
+    assert details["multi_credential"] is False
+
+
+@patch("odc_core.login_failure.graph_client.send_mail")
+def test_handle_other_kind_is_reported_as_other(mock_send, tmp_path):
+    errors = MagicMock()
+    login_failure.handle_login_failure(
+        errors, _config(tmp_path), supplier_name="Wave", job_id=1, row=ROW,
+        detail="Portal failed to load: timeout",
+    )
+    mock_send.assert_not_called()
+    assert _details(errors)["category"] == "other"
+
+
+@patch("odc_core.login_failure.graph_client.send_mail")
+def test_handle_recaptcha_timeout_is_reported_under_its_own_category(mock_send, tmp_path):
+    errors = MagicMock()
+    login_failure.handle_login_failure(
+        errors, _config(tmp_path), supplier_name="Energia", job_id=9, row=ROW,
+        detail="Nobody completed the reCAPTCHA", kind=K.RECAPTCHA_NOT_COMPLETED,
+    )
+    mock_send.assert_not_called()
+    assert _details(errors)["category"] == "recaptcha_not_completed"
 
 
 @pytest.mark.parametrize("kind", [K.CREDENTIALS_REJECTED, K.ACCOUNT_LOCKED, K.PASSWORD_CHANGE_REQUIRED, K.OTP_NOT_RECEIVED])
 @patch("odc_core.login_failure.graph_client.send_mail")
-@patch("odc_core.db.pyodbc.connect")
-def test_handle_toolkit_owns_paused_service_with_owner(mock_connect, mock_send, tmp_path, caplog, kind):
-    _, cursor = _connection(mock_connect, (31, 1, 1))
-    errors = MagicMock()
-    with caplog.at_level("INFO", logger="odc_core.login_failure"):
-        sent = login_failure.handle_login_failure(
-            errors, _toolkit_config(tmp_path), supplier_name="EDF Energy", job_id=42,
-            row=ROW, detail="Invalid username or password", kind=kind, process_id=21090,
-        )
-    assert sent is False
-    mock_send.assert_not_called()
-    errors.add.assert_not_called()
-    assert not list(tmp_path.glob("*.json"))
-    assert "failure id 31" in caplog.text and "notified by the toolkit" in caplog.text
-    params = cursor.execute.call_args.args[1:]
-    assert params[:5] == (42, str(kind), "Invalid username or password", "billing@acme.co.uk",
-                          "https://portal.example.com/login")
-    assert params[6:] == (21090, 0)
-    assert "s3cret!" not in [str(p) for p in params]
-    assert "s3cret" not in caplog.text
-
-
-@pytest.mark.parametrize("outputs", [(31, 1, 0), (31, 0, 1), (None, 0, 0)])
-@patch("odc_core.login_failure.graph_client.send_mail")
-@patch("odc_core.db.pyodbc.connect")
-def test_handle_no_owner_or_not_paused_takes_old_path(mock_connect, mock_send, tmp_path, outputs):
-    _connection(mock_connect, outputs)
-    errors = MagicMock()
-    sent = login_failure.handle_login_failure(
-        errors, _toolkit_config(tmp_path), supplier_name="EDF Energy", job_id=42,
-        row=ROW, detail="Invalid password", kind=K.CREDENTIALS_REJECTED,
-    )
-    assert sent is True
-    assert mock_send.call_args.args[1] == "support@systems-link.com"
-    errors.add.assert_not_called()
-
-
-@patch("odc_core.login_failure.graph_client.send_mail")
-@patch("odc_core.db.pyodbc.connect")
-def test_handle_first_otp_miss_recorded_by_toolkit_is_quiet(mock_connect, mock_send, tmp_path, caplog):
-    _connection(mock_connect, (31, 0, 1))
-    errors = MagicMock()
-    with caplog.at_level("WARNING", logger="odc_core.login_failure"):
-        sent = login_failure.handle_login_failure(
-            errors, _toolkit_config(tmp_path), supplier_name="Pozitive Energy", job_id=5571,
-            row=ROW, detail="OTP not received", kind=K.OTP_NOT_RECEIVED,
-        )
-    assert sent is False
-    mock_send.assert_not_called()
-    errors.add.assert_not_called()
-    assert "second miss" in caplog.text
-
-
-@pytest.mark.parametrize("outputs", [(31, 0, 0), (None, 0, 0)])
-@patch("odc_core.login_failure.graph_client.send_mail")
-@patch("odc_core.db.pyodbc.connect")
-def test_handle_otp_miss_without_owner_takes_old_path(mock_connect, mock_send, tmp_path, outputs):
-    _connection(mock_connect, outputs)
-    errors = MagicMock()
-    sent = login_failure.handle_login_failure(
-        errors, _toolkit_config(tmp_path), supplier_name="Pozitive Energy", job_id=5571,
-        row=ROW, detail="OTP not received", kind=K.OTP_NOT_RECEIVED,
-    )
-    assert sent is True
-    assert mock_send.call_args.args[1] == "support@systems-link.com"
-    errors.add.assert_not_called()
-
-
-@patch("odc_core.login_failure.graph_client.send_mail")
-@patch("odc_core.db.pyodbc.connect")
-def test_handle_other_kind_takes_old_path_even_if_paused(mock_connect, mock_send, tmp_path):
-    _, cursor = _connection(mock_connect, (31, 1, 1))
-    errors = MagicMock()
-    sent = login_failure.handle_login_failure(
-        errors, _toolkit_config(tmp_path), supplier_name="Wave", job_id=1,
-        row=ROW, detail="Portal failed to load: timeout",
-    )
-    assert sent is False
-    assert cursor.execute.call_args.args[2] == "other"
-    errors.add.assert_called_once()
-    assert "Wave login failed for job 1 (other)" in errors.add.call_args.args[0]
-    mock_send.assert_not_called()
-
-
-@patch("odc_core.login_failure.graph_client.send_mail")
-@patch("odc_core.db.pyodbc.connect")
-def test_handle_multi_credential_takes_old_path_and_passes_flag(mock_connect, mock_send, tmp_path):
-    _, cursor = _connection(mock_connect, (31, 1, 1))
-    errors = MagicMock()
-    sent = login_failure.handle_login_failure(
-        errors, _toolkit_config(tmp_path), supplier_name="SFB", job_id=3, row=MULTI_ROW,
-        username="cred2@acme.co.uk", detail="Invalid password", kind=K.CREDENTIALS_REJECTED,
-        team_alert=False,
-    )
-    assert sent is True
-    params = cursor.execute.call_args.args[1:]
-    assert params[3] == "cred2@acme.co.uk"
-    assert params[7] == 1
-    mock_send.assert_called_once()
-    errors.add.assert_not_called()
-
-
-@patch("odc_core.login_failure.graph_client.send_mail")
-@patch("odc_core.db.pyodbc.connect")
-def test_handle_multi_credential_flag_resolution(mock_connect, mock_send, tmp_path):
-    _, cursor = _connection(mock_connect, (31, 1, 1))
-    cfg = _toolkit_config(tmp_path)
-    base = dict(supplier_name="SFB", job_id=3, detail="x", kind=K.CREDENTIALS_REJECTED)
-
-    # A sentinel job-level login with the default team_alert is still multi-credential.
-    login_failure.handle_login_failure(MagicMock(), cfg, row=MULTI_ROW, **base)
-    assert cursor.execute.call_args.args[8] == 1
-
-    # An explicit value wins over team_alert in both directions.
-    assert login_failure.handle_login_failure(
-        MagicMock(), cfg, row=ROW, team_alert=False, multi_credential=False, **base) is False
-    assert cursor.execute.call_args.args[8] == 0
-    login_failure.handle_login_failure(MagicMock(), cfg, row=ROW, multi_credential=True, **base)
-    assert cursor.execute.call_args.args[8] == 1
-
-
-@patch("odc_core.login_failure.graph_client.send_mail")
-@patch("odc_core.db.pyodbc.connect", side_effect=RuntimeError("db down"))
-def test_handle_report_raising_takes_old_path_plus_error(mock_connect, mock_send, tmp_path):
-    errors = MagicMock()
-    sent = login_failure.handle_login_failure(
-        errors, _toolkit_config(tmp_path), supplier_name="EDF Energy", job_id=42,
-        row=ROW, detail="Invalid password", kind=K.CREDENTIALS_REJECTED,
-    )
-    assert sent is True
-    mock_send.assert_called_once()
-    errors.add.assert_called_once()
-    assert errors.add.call_args.args[0] == (
-        "EDF Energy login failure for job 42 could not be recorded for the toolkit"
-    )
-    assert isinstance(errors.add.call_args.kwargs["exception"], RuntimeError)
-
-
-@patch("odc_core.login_failure.graph_client.send_mail")
-@patch("odc_core.db.pyodbc.connect")
-def test_handle_report_raising_other_kind_adds_both_errors(mock_connect, mock_send, tmp_path):
+def test_one_failed_login_of_several_is_reported_naming_the_login(mock_send, tmp_path, kind):
     errors = MagicMock()
     login_failure.handle_login_failure(
-        errors, _toolkit_config(tmp_path), supplier_name="Wave", job_id="not-a-number", row=ROW, detail="timeout",
+        errors, _config(tmp_path), supplier_name="Source for Business", job_id=7, row=ROW,
+        detail="Invalid password", kind=kind, username="second@acme.example", team_alert=False,
     )
-    mock_connect.assert_not_called()
-    assert errors.add.call_count == 2
-    assert "login failed for job not-a-number (other)" in errors.add.call_args_list[0].args[0]
-    assert "could not be recorded for the toolkit" in errors.add.call_args_list[1].args[0]
+    errors.add.assert_called_once()
+    details = _details(errors)
+    assert details["username"] == "second@acme.example"
+    assert details["multi_credential"] is True
+
+
+@patch("odc_core.login_failure.graph_client.send_mail")
+def test_one_login_of_several_failing_for_our_own_reasons_stays_quiet(mock_send, tmp_path):
+    errors = MagicMock()
+    login_failure.handle_login_failure(
+        errors, _config(tmp_path), supplier_name="Source for Business", job_id=7, row=ROW,
+        detail="Page did not load", username="second@acme.example", team_alert=False,
+    )
+    errors.add.assert_not_called()
+
+
+@patch("odc_core.login_failure.graph_client.send_mail")
+def test_multi_credential_is_worked_out_from_the_job_row(mock_send, tmp_path):
+    errors = MagicMock()
+    row = dict(ROW, username="multi_credential", password="multi_credential")
+    login_failure.handle_login_failure(
+        errors, _config(tmp_path), supplier_name="Source for Business", job_id=7, row=row,
+        detail="All logins failed", kind=K.CREDENTIALS_REJECTED,
+    )
+    assert _details(errors)["multi_credential"] is True
+    login_failure.handle_login_failure(
+        errors, _config(tmp_path), supplier_name="Source for Business", job_id=7, row=row,
+        detail="x", kind=K.CREDENTIALS_REJECTED, multi_credential=False,
+    )
+    assert _details(errors, 1)["multi_credential"] is False
+
+
+@patch("odc_core.login_failure.graph_client.send_mail")
+def test_an_old_automation_core_without_details_is_still_told(mock_send, tmp_path):
+    calls = []
+
+    class OldErrors:
+        def add(self, message, *, exception=None):
+            calls.append(message)
+
+    login_failure.handle_login_failure(
+        OldErrors(), _config(tmp_path), supplier_name="Wave", job_id=1, row=ROW, detail="x",
+    )
+    assert calls == ["Wave login failed for job 1 (other): x"]
 
 
 @patch("odc_core.db.pyodbc.connect")
-def test_report_success_not_configured(mock_connect, tmp_path):
-    assert login_failure.report_login_success(_config(tmp_path), job_id=1) is False
-    cfg = _toolkit_config(tmp_path)
-    del cfg["tables"]["live"]["report_login_success"]
-    assert login_failure.report_login_success(cfg, job_id=1, process_id=2) is False
+def test_the_bot_no_longer_reports_to_the_database(mock_connect, tmp_path):
+    config = _config(tmp_path)
+    config["database"] = {"dsn": "Jupiter"}
+    config["tables"] = {"live": {
+        "report_login_failure": "Titan_INSE.dbo.spODC_ReportLoginFailure",
+        "report_login_success": "Titan_INSE.dbo.spODC_ReportLoginSuccess",
+    }}
+    assert login_failure.report_login_failure(config, job_id=5, kind=K.CREDENTIALS_REJECTED) is None
+    assert login_failure.report_login_success(config, job_id=5) is False
+    with patch("odc_core.login_failure.graph_client.send_mail"):
+        login_failure.handle_login_failure(
+            MagicMock(), config, supplier_name="EDF Energy", job_id=5, row=ROW,
+            detail="Invalid password", kind=K.CREDENTIALS_REJECTED,
+        )
     mock_connect.assert_not_called()
-
-
-@pytest.mark.parametrize("output,expected", [(1, True), (True, True), (0, False), (None, False)])
-@patch("odc_core.db.pyodbc.connect")
-def test_report_success_configured(mock_connect, tmp_path, output, expected):
-    conn, cursor = _connection(mock_connect, (output,))
-    assert login_failure.report_login_success(
-        _toolkit_config(tmp_path, env="dev"), job_id="42", process_id="21090",
-    ) is expected
-    sql, *params = cursor.execute.call_args.args
-    assert f"EXEC {OK_PROC} @job_id = ?, @process_id = ?, @resolved = @r OUTPUT" in sql
-    assert params == [42, 21090]
-    conn.commit.assert_called_once()
-
-
-@patch("odc_core.db.pyodbc.connect", side_effect=RuntimeError("db down"))
-def test_report_success_never_raises(mock_connect, tmp_path, caplog):
-    assert login_failure.report_login_success(_toolkit_config(tmp_path), job_id=42) is False
-    assert "could not report the successful login for job 42" in caplog.text
-    assert login_failure.report_login_success(_toolkit_config(tmp_path), job_id="abc") is False

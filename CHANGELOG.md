@@ -5,6 +5,23 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.14.1] - 2026-11-11
+### Changed
+- The Control Room's failure triage now decides what a failed run was and hands inse-toolkit the failures a business owner can fix (decided 2026-11-11). The bot's part is to give the Control Room something it can triage, every time:
+  - `handle_login_failure()` always calls `errors.add()` for a job-level failure, including when SystemsLink was emailed or was within its cooldown (0.13.x and 0.14.0 stayed silent then). The message text is unchanged.
+  - The call now passes `details=failure_details(...)`: `source` (`odc_login_failure`), `category`, `kind`, `odc_job_id`, `supplier`, `client`, `username`, `portal_url`, `screenshot` (UNC path), `multi_credential`, `process_id` and `detail` (cut to 1000 characters). Never the password. On an `automation_core` whose `ErrorCollector.add()` has no `details` keyword, it falls back to the plain message.
+  - On a multi-credential job, a single failed login (`team_alert=False`) with an owner-fixable kind is now reported too, naming that login, so inse-toolkit can switch off just that login. A per-login `OTHER` stays quiet, as before.
+- `report_login_failure()` and `report_login_success()` (0.14.0) do nothing: they always return None and False, with no database call, whatever the tables keys say. With the bot and the Control Room both writing to the toolkit's tables, every failure would be counted twice. `handle_login_failure()` no longer calls them; its `tables` and `dsn` keywords are accepted and ignored. The tables keys `report_login_failure` / `report_login_success` can be removed from bots' config and are harmless if left.
+### Added
+- `LoginFailureKind.RECAPTCHA_NOT_COMPLETED`: a human-assisted login nobody completed before the wait ran out. Not a credential problem: not notifiable to SystemsLink, not owner-fixable, and ranked with `OTHER` by `escalate()`. Set by the bot.
+- `category_for(kind) -> str`: `login_error` (credentials rejected, account locked, password change required), `otp_not_received`, `recaptcha_not_completed` or `other`.
+- `OWNER_FIXABLE_KINDS` and the `CATEGORY_*` constants.
+- `failure_details(...) -> dict`, the block above.
+### Unchanged
+- The SystemsLink email. inse-toolkit emails SystemsLink as a service's owner once it is live for that service; turn this one off then (`login_failure_notification.enabled: false`) or SystemsLink is told twice.
+### Why
+- 0.14.0 had the bot record failures in the database itself. inse-toolkit now receives them from the Control Room's triage instead (POST /api/odc-management/login-failures), which needs the failure as fields, and needs each failed login of a multi-credential service named.
+
 ## [0.14.0] - 2026-11-11
 ### Added
 - `login_failure.report_login_failure(config, *, job_id, kind, detail=None, username=None, portal_url=None, screenshot=None, process_id=None, multi_credential=False, tables=None, dsn=None) -> LoginFailureReport | None`: records a failed login for inse-toolkit by calling the stored procedure named in the new optional tables key `report_login_failure` (`spODC_ReportLoginFailure`). Returns the frozen dataclass `LoginFailureReport(failure_id, paused, has_owner)`, or None (no database call) when the key is missing or blank. Raises on a database error. `detail` is cut to 1000 characters, `username` to 100, `portal_url` to 300 and the screenshot path (stored as a UNC path string) to 500. The password is never passed.

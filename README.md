@@ -146,6 +146,12 @@ for detail in job_details:
   0.13.12) to attach the failed page. Suppliers set
   `self._login_failure_kind` using `classify_portal_message()` on text the
   portal displayed (never on exception text) and `escalate()`.
+  0.14.1: every job-level failure is reported to the Control Room through
+  `errors.add()` with a `details` block (`failure_details()`: category, kind, ODC job,
+  login, screenshot path) for its failure triage, which hands owner-fixable failures to
+  inse-toolkit. Each owner-fixable failed login of a multi-credential job is reported too,
+  naming the login. The text below about recording to the database describes 0.14.0 and
+  no longer applies: `report_login_failure()` / `report_login_success()` are no-ops.
   0.14.0: when the optional tables key `report_login_failure` is set, the
   failure is first recorded for inse-toolkit (`report_login_failure()`,
   stored procedure `spODC_ReportLoginFailure`). If that pauses the service
@@ -200,7 +206,7 @@ tables:
   live: {jobs: ..., job_details: ..., scrape_data: ..., scrape_accounts: ..., suppliers: ..., web_scrape_data: ..., multi_credential: ..., credential: ..., db_name: ...}
   # grab-all callers only: grab_all_data: ODC_grab_all_data
   # grab-all resume (0.13.8): grab_all_cycle: ODC_grab_all_cycle, grab_all_progress: ODC_grab_all_progress
-  # login failures to inse-toolkit (0.14.0), optional, dev block only for now:
+  # 0.14.0 only, ignored since 0.14.1 (the Control Room reports to the toolkit):
   #   report_login_failure: Titan_INSE_DEV.dbo.spODC_ReportLoginFailure
   #   report_login_success: Titan_INSE_DEV.dbo.spODC_ReportLoginSuccess
 
