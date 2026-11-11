@@ -404,14 +404,14 @@ entry point of its own.
   are read from `config["tables"][live|dev]` and `config["database"]["dsn"]`.
   DEV only so far: the procedures exist on `Titan_INSE_DEV` only, and no
   bot is updated yet (see Outstanding TODOs). Tests mock
-  `odc_core.db.pyodbc.connect`; nothing was run against a database. Not
-  released.
+  `odc_core.db.pyodbc.connect`; nothing was run against a database.
+  Released 2026-11-11; every supplier bot re-pinned the same day.
   Also in 0.14.0 (2026-11-11): `LoginFailureKind.OTP_NOT_RECEIVED`, a
   credential kind for a portal OTP that never reached our mailbox (the
   login's registered email does not forward there). Requested so Pozitive
   Energy's "OTP not received" goes to the service's business owner, not
   the team. It was `OTHER` (our-side) before. The procedure must accept it
-  too (accounts-and-jobs-refresh `sql/dev/17`), and inse-toolkit needs a
+  too (accounts-and-jobs-refresh `sql/dev/15`), and inse-toolkit needs a
   label and owner action for it. A first OTP miss (recorded, not paused,
   service has an owner) is left to the toolkit too: a WARNING, no
   SystemsLink email, no team alert. 335 tests pass.
@@ -1110,7 +1110,8 @@ entry point of its own.
   does not exist and made the documented `pip install` URLs 404).
 
 ## Outstanding TODOs
-- v0.14.0 (not released). The bots are not updated yet. Each bot needs the
+- v0.14.0 released 2026-11-11 and pinned in every supplier bot. Only
+  automation-odc-pozitive-energy is wired up so far. Every other bot needs the
   two tables keys in its `config.yaml` and `config.template.yaml`
   (`report_login_failure`, `report_login_success`; the `dev` block only for
   now, because the procedures are not on live `Titan_INSE`) and a
