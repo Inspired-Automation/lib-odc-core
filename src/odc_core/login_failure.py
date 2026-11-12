@@ -102,7 +102,59 @@ class LoginFailureKind(StrEnum):
     #: the wait ran out. Not a credential problem: the Control Room sends a
     #: notification, nothing is paused. Set by the bot.
     RECAPTCHA_NOT_COMPLETED = "recaptcha not completed"
+    #: 0.14.2. Where the login got to before it failed, for a failure that is
+    #: not a credential problem, so the Control Room can tell them apart
+    #: instead of seeing "other". All are triage category ``other``.
+    #: The login page never loaded: navigation timed out or errored, or the
+    #: portal showed a maintenance / service-unavailable message.
+    PORTAL_UNAVAILABLE = "portal unavailable"
+    #: The login page loaded but the username/password form never appeared
+    #: (portal redesigned, interstitial page, bot block).
+    LOGIN_FORM_NOT_FOUND = "login form not found"
+    #: Credentials were submitted, no error message was shown, but the page
+    #: the bot expects after a login (dashboard, account list) never loaded.
+    LANDING_PAGE_NOT_REACHED = "landing page not reached"
+    #: Credentials were submitted on a portal that asks for a one-time
+    #: passcode, but the passcode entry page never appeared.
+    OTP_PAGE_NOT_REACHED = "otp page not reached"
+    #: A one-time passcode arrived and was entered, but the portal did not
+    #: accept it (wrong, expired, already used).
+    OTP_REJECTED = "otp rejected"
     OTHER = "other"
+
+
+#: 0.14.2. One line per kind, for the log and the Control Room, saying what
+#: the bot saw. The first words are the label triage groups by.
+KIND_DESCRIPTIONS: dict[LoginFailureKind, str] = {
+    LoginFailureKind.CREDENTIALS_REJECTED:
+        "Invalid credentials - the portal showed an invalid username/email or password message",
+    LoginFailureKind.ACCOUNT_LOCKED:
+        "Account locked - the portal says the login is locked, suspended or has had too many attempts",
+    LoginFailureKind.PASSWORD_CHANGE_REQUIRED:
+        "Password change required - the portal is forcing a password change before sign-in",
+    LoginFailureKind.OTP_NOT_RECEIVED:
+        "OTP email not received - the portal asked for a one-time passcode but none reached the OTP mailbox",
+    LoginFailureKind.OTP_PAGE_NOT_REACHED:
+        "OTP page not reached - after submitting the login the one-time passcode page never appeared",
+    LoginFailureKind.OTP_REJECTED:
+        "OTP rejected - the one-time passcode was entered but the portal did not accept it",
+    LoginFailureKind.RECAPTCHA_NOT_COMPLETED:
+        "reCAPTCHA not completed - the human-assisted login was not completed before the wait ran out",
+    LoginFailureKind.LANDING_PAGE_NOT_REACHED:
+        "Landing page not reached - the login was submitted with no error shown, but the expected "
+        "post-login page never loaded",
+    LoginFailureKind.LOGIN_FORM_NOT_FOUND:
+        "Login form not found - the login page loaded but the username/password fields never appeared",
+    LoginFailureKind.PORTAL_UNAVAILABLE:
+        "Portal unavailable - the login page did not load or the portal reported it is unavailable",
+    LoginFailureKind.OTHER:
+        "Unclassified login failure - see detail",
+}
+
+
+def describe(kind: LoginFailureKind | str | None) -> str:
+    """The one-line description of a failure kind (0.14.2)."""
+    return KIND_DESCRIPTIONS[_as_kind(kind)]
 
 
 #: Kinds the client can fix themselves, so the only ones SystemsLink is
@@ -171,17 +223,40 @@ _PORTAL_PATTERNS: tuple[tuple[LoginFailureKind, re.Pattern[str]], ...] = (
         r"|not (been )?able to (log|sign) you in",
         re.I,
     )),
+    # 0.14.2. Last, so any credential message on the same page wins.
+    (LoginFailureKind.OTP_REJECTED, re.compile(
+        r"(one[ -]?time )?(pass ?code|verification code|security code|otp|code you entered)"
+        r" (is |was |has |have |you entered |entered )*(invalid|incorrect|wrong|expired|not valid|not recogni[sz]ed)"
+        r"|(invalid|incorrect|wrong|expired) (one[ -]?time )?(pass ?code|verification code|security code|otp)",
+        re.I,
+    )),
+    (LoginFailureKind.PORTAL_UNAVAILABLE, re.compile(
+        r"(service|site|website|portal|system|page) (is )?(temporarily )?(unavailable|down|offline)"
+        r"|(scheduled |planned )?maintenance (is )?(in progress|underway|work)"
+        r"|(undergoing|under) (scheduled |planned )?maintenance"
+        r"|\b50[234] (bad gateway|service unavailable|gateway time-?out)",
+        re.I,
+    )),
 )
 
+# Higher wins in escalate(). The credential kinds are top: once the portal
+# has said the password is wrong, nothing later hides it. Below them, the
+# further the login got the more specific the failure, so a later retry that
+# only hits a slow page cannot hide an earlier "OTP page not reached".
 _KIND_RANK = {
     LoginFailureKind.OTHER: 0,
     LoginFailureKind.RECAPTCHA_NOT_COMPLETED: 0,
+    LoginFailureKind.PORTAL_UNAVAILABLE: 1,
+    LoginFailureKind.LOGIN_FORM_NOT_FOUND: 2,
+    LoginFailureKind.LANDING_PAGE_NOT_REACHED: 3,
+    LoginFailureKind.OTP_PAGE_NOT_REACHED: 4,
     # Below the password kinds: an OTP is only asked for once the password
     # was accepted, so a "password incorrect" seen on any attempt wins.
-    LoginFailureKind.OTP_NOT_RECEIVED: 1,
-    LoginFailureKind.CREDENTIALS_REJECTED: 2,
-    LoginFailureKind.ACCOUNT_LOCKED: 3,
-    LoginFailureKind.PASSWORD_CHANGE_REQUIRED: 4,
+    LoginFailureKind.OTP_NOT_RECEIVED: 5,
+    LoginFailureKind.OTP_REJECTED: 5,
+    LoginFailureKind.CREDENTIALS_REJECTED: 6,
+    LoginFailureKind.ACCOUNT_LOCKED: 7,
+    LoginFailureKind.PASSWORD_CHANGE_REQUIRED: 8,
 }
 
 
@@ -236,6 +311,120 @@ def _as_kind(value: LoginFailureKind | str | None) -> LoginFailureKind:
         return LoginFailureKind(value) if value else LoginFailureKind.OTHER
     except ValueError:
         return LoginFailureKind.OTHER
+
+
+#: Visible error/alert elements a portal uses to say why a login failed.
+_MESSAGE_SELECTORS = (
+    "[role=alert]", "[role=alertdialog]", "[aria-live=assertive]", "[aria-live=polite]",
+    ".alert", ".alert-danger", ".alert-error", ".error", ".errors", ".error-message",
+    ".errorMessage", ".error-text", ".validation-summary-errors", ".field-validation-error",
+    ".invalid-feedback", ".text-danger", ".help-block", ".message-error", ".notification-error",
+    ".mat-error", "mat-error", ".mat-mdc-form-field-error", ".toast-error", ".snackbar",
+    "[class*='error' i]", "[class*='alert' i]", "[id*='error' i]",
+)
+
+# Visible text of the elements above, de-duplicated, child elements whose
+# text is already part of a parent skipped. Runs in the page; never throws.
+_MESSAGE_JS = """(selectors) => {
+  const seen = new Set(); const out = [];
+  const visible = (el) => {
+    const s = window.getComputedStyle(el); const r = el.getBoundingClientRect();
+    return s.display !== 'none' && s.visibility !== 'hidden' && Number(s.opacity) !== 0
+      && r.width > 0 && r.height > 0;
+  };
+  for (const sel of selectors) {
+    let els = []; try { els = document.querySelectorAll(sel); } catch (e) { continue; }
+    for (const el of els) {
+      if (['INPUT','SELECT','TEXTAREA','FORM','BODY','HTML','MAIN'].includes(el.tagName)) continue;
+      if (!visible(el)) continue;
+      const t = (el.innerText || '').replace(/\\s+/g, ' ').trim();
+      if (!t || t.length > 400 || seen.has(t)) continue;
+      if (out.some((o) => o.includes(t))) continue;
+      seen.add(t); out.push(t);
+      if (out.length >= 8) return out;
+    }
+  }
+  return out;
+}"""
+
+
+@dataclass(frozen=True)
+class PageDiagnosis:
+    """What ``diagnose_page()`` read off the page a login ended on (0.14.2)."""
+
+    kind: LoginFailureKind
+    portal_message: str | None
+    page_url: str | None
+
+
+def read_portal_messages(page: Any, extra_selectors: tuple[str, ...] | list[str] = ()) -> list[str]:
+    """Visible error/alert texts on ``page`` (and its frames), most specific
+    selectors first. ``extra_selectors`` are the supplier's own error
+    elements, checked first. Never raises; returns [] when nothing is shown
+    or the page cannot be read."""
+    selectors = list(extra_selectors) + list(_MESSAGE_SELECTORS)
+    messages: list[str] = []
+    try:
+        frames = list(getattr(page, "frames", None) or [page])
+    except Exception:
+        frames = [page]
+    for frame in frames:
+        try:
+            found = frame.evaluate(_MESSAGE_JS, selectors) or []
+        except Exception:
+            continue
+        for text in found:
+            if isinstance(text, str) and text not in messages:
+                messages.append(text)
+    return messages
+
+
+def diagnose_page(
+    page: Any,
+    *,
+    extra_selectors: tuple[str, ...] | list[str] = (),
+    check_password_change: bool = True,
+) -> PageDiagnosis:
+    """Read why a login failed off the page it ended on (0.14.2).
+
+    Looks, in order, for a forced password-change page
+    (``password_change.detect_password_change``), then for a visible
+    error/alert message the portal displayed and classifies it with
+    ``classify_portal_message()`` - so an "invalid email or password" banner
+    is always ``CREDENTIALS_REJECTED``. Returns the kind (``OTHER`` when the
+    page says nothing recognisable), the message text (even when
+    unrecognised, so triage can read it) and the page URL.
+
+    Only error/alert elements are read, never the whole page body: a login
+    page's own help text ("Account locked? Contact us") would otherwise be
+    taken for a portal message. Never raises.
+    """
+    if page is None:
+        return PageDiagnosis(LoginFailureKind.OTHER, None, None)
+    try:
+        url = str(page.url) if getattr(page, "url", None) else None
+    except Exception:
+        url = None
+
+    if check_password_change:
+        try:
+            from . import password_change  # imports this module, so not at top level
+            reason = password_change.detect_password_change(page)
+        except Exception:
+            logger.debug("LOGIN_FAILURE - password-change check failed", exc_info=True)
+            reason = None
+        if reason:
+            return PageDiagnosis(LoginFailureKind.PASSWORD_CHANGE_REQUIRED, _clip(reason, 500), url)
+
+    messages = read_portal_messages(page, extra_selectors)
+    kind = LoginFailureKind.OTHER
+    for text in messages:
+        kind = escalate(kind, classify_portal_message(text))
+    # The message that decided the kind first, then the rest, for the log.
+    if kind != LoginFailureKind.OTHER:
+        messages.sort(key=lambda m: classify_portal_message(m) != kind)
+    message = _clip(" | ".join(messages), 1000)
+    return PageDiagnosis(kind, message, url)
 
 
 def _settings(config: dict) -> dict:
@@ -549,17 +738,27 @@ def failure_details(
     screenshot: str | Path | None = None,
     process_id: Any = None,
     multi_credential: bool = False,
+    portal_message: str | None = None,
+    page_url: str | None = None,
 ) -> dict:
     """The ``details`` block sent to the Control Room with a login failure
     (0.14.1): everything its triage needs as fields, never the password.
     ``username`` is the login that failed, which is what lets inse-toolkit
-    switch off one login of a multi-credential service."""
+    switch off one login of a multi-credential service.
+
+    0.14.2 adds ``kind_description`` (``describe()``), ``portal_message``
+    (the error text the portal displayed, if any) and ``page_url`` (where
+    the login ended). ``category`` keeps its four values: inse-toolkit
+    rejects any other, and the new kinds are all ``other``."""
     kind = _as_kind(kind)
     job = _int_or_none(job_id)
     return {
         "source": "odc_login_failure",
         "category": category_for(kind),
         "kind": str(kind),
+        "kind_description": describe(kind),
+        "portal_message": _clip(portal_message, 1000),
+        "page_url": _clip(page_url, 500),
         "odc_job_id": job if job is not None else (str(job_id) if job_id is not None else None),
         "supplier": supplier_name,
         "client": _clip(client_name, 300),
@@ -602,8 +801,21 @@ def handle_login_failure(
     multi_credential: bool | None = None,
     tables: dict | None = None,
     dsn: str | None = None,
+    portal_message: str | None = None,
+    page_url: str | None = None,
+    page: Any = None,
 ) -> bool:
     """The single login-failure path for every supplier bot.
+
+    0.14.2: ``portal_message`` (the error the portal displayed) and
+    ``page_url`` (where the login ended) are logged and sent to the Control
+    Room. Pass ``page`` - the Playwright page the login failed on, still
+    open - and the library reads both off it with ``diagnose_page()``,
+    filling whichever the caller left out, and raises ``kind`` to what the
+    page shows (an "invalid password" banner makes an ``OTHER`` or a
+    ``LANDING_PAGE_NOT_REACHED`` into ``CREDENTIALS_REJECTED``). It never
+    lowers a kind the bot set. With ``page`` and no ``screenshot``, it
+    takes one (named ``login_<kind>``) before reporting (0.14.2).
 
     Logs one ERROR line, emails SystemsLink when ``notify_client()``'s rules
     allow, and reports the failure to the Control Room through
@@ -633,16 +845,65 @@ def handle_login_failure(
     ``multi_credential`` None (the default) means ``not team_alert``, or a
     ``row`` whose job-level login is the ``multi_credential`` sentinel.
     """
+    return _handle_login_failure(
+        errors, config, supplier_name=supplier_name, job_id=job_id, row=row, detail=detail,
+        kind=kind, username=username, portal_url=portal_url, client_name=client_name,
+        team_alert=team_alert, screenshot=screenshot, process_id=process_id,
+        multi_credential=multi_credential, tables=tables, dsn=dsn,
+        portal_message=portal_message, page_url=page_url, page=page,
+    ).sent
+
+
+def _handle_login_failure(
+    errors: Any,
+    config: dict,
+    *,
+    supplier_name: str,
+    job_id: Any,
+    row: dict | None = None,
+    detail: str | None = None,
+    kind: LoginFailureKind | str | None = None,
+    username: str | None = None,
+    portal_url: str | None = None,
+    client_name: str | None = None,
+    team_alert: bool = True,
+    screenshot: str | Path | None = None,
+    process_id: Any = None,
+    multi_credential: bool | None = None,
+    tables: dict | None = None,
+    dsn: str | None = None,
+    portal_message: str | None = None,
+    page_url: str | None = None,
+    page: Any = None,
+) -> "LoginFailureOutcome":
     row = row or {}
     kind = _as_kind(kind)
+    if page is not None:
+        try:
+            diagnosis = diagnose_page(page, check_password_change=kind != LoginFailureKind.PASSWORD_CHANGE_REQUIRED)
+            kind = escalate(kind, diagnosis.kind)
+            portal_message = portal_message or diagnosis.portal_message
+            page_url = page_url or diagnosis.page_url
+        except Exception:
+            logger.debug("LOGIN_FAILURE - could not diagnose the page for job %s", job_id, exc_info=True)
+    if screenshot is None and page is not None:
+        # 0.14.2: always a picture of the failed login before the bot ends.
+        try:
+            from .process_failure import screenshot_for  # imports this module
+            screenshot = screenshot_for(page, config, f"login_{kind}")
+        except Exception:
+            logger.debug("LOGIN_FAILURE - could not screenshot job %s", job_id, exc_info=True)
     login = username if username is not None else (row.get("username") or "")
     url = portal_url if portal_url is not None else row.get("url")
     client = client_name if client_name is not None else row.get("client_name")
     text = (detail or "").strip() or "(no detail)"
+    shown = (portal_message or "").strip()
 
     logger.error(
-        "LOGIN_FAILURE - %s login failed for job %s | kind=%s | client=%s | user=%s | %s",
-        supplier_name, job_id, kind, client or "(none)", login or "(none)", text,
+        "LOGIN_FAILURE - %s login failed for job %s | kind=%s | %s | portal_message=%s | page_url=%s"
+        " | screenshot=%s | client=%s | user=%s | detail=%s",
+        supplier_name, job_id, kind, describe(kind), f"'{shown}'" if shown else "(none shown)",
+        page_url or "(unknown)", screenshot or "(none)", client or "(none)", login or "(none)", text,
     )
     if multi_credential is None:
         multi = (not team_alert) or jobstodo.is_multi_credential_job(row.get("username"), row.get("password"))
@@ -672,14 +933,210 @@ def handle_login_failure(
             supplier_name=supplier_name, job_id=job_id, kind=kind, detail=detail,
             username=login, portal_url=url, client_name=client, screenshot=screenshot,
             process_id=process_id, multi_credential=multi,
+            portal_message=portal_message, page_url=page_url,
         )
-        _add_error(errors, f"{supplier_name} login failed for job {job_id} ({kind}): {text}", details=details)
+        message = f"{supplier_name} login failed for job {job_id} ({kind}): {describe(kind)}. Detail: {text}"
+        if shown:
+            message += f" | Portal said: '{_clip(shown, 300)}'"
+        if page_url:
+            message += f" | Page: {_clip(page_url, 300)}"
+        _add_error(errors, message, details=details)
     if email_error is not None:
         _add_error(
             errors, f"{supplier_name} login-failure notice to SystemsLink failed for job {job_id}",
             exception=email_error,
         )
-    return sent
+    return LoginFailureOutcome(sent, kind, portal_message, page_url, screenshot, detail)
+
+
+# --- Multi-credential jobs (0.14.2) ------------------------------------------
+# Every multi-credential bot reports a failed login, and "every login failed",
+# the same way and with the same detail as a single-credential job.
+
+@dataclass(frozen=True)
+class LoginFailureOutcome:
+    """What one login failure was reported as."""
+
+    sent: bool
+    kind: LoginFailureKind
+    portal_message: str | None
+    page_url: str | None
+    screenshot: str | Path | None
+    detail: str | None
+
+
+@dataclass(frozen=True)
+class CredentialFailure:
+    """One failed login of a multi-credential job, kept for the job-level report."""
+
+    username: str
+    kind: LoginFailureKind
+    detail: str | None
+    portal_message: str | None
+    page_url: str | None
+    screenshot: str | None
+    portal_url: str | None = None
+
+
+_SUPPLIER_ATTRS = {
+    "_login_failure_detail": "",
+    "_login_failure_kind": LoginFailureKind.OTHER,
+    "_login_failure_screenshot": None,
+    "_login_failure_portal_message": None,
+    "_login_failure_page_url": None,
+}
+
+
+def reset_supplier_login_failure(supplier: Any) -> None:
+    """Clear a supplier object's ``_login_failure_*`` attributes before the next login."""
+    for name, value in _SUPPLIER_ATTRS.items():
+        try:
+            setattr(supplier, name, value)
+        except Exception:
+            pass
+
+
+def handle_credential_login_failure(
+    errors: Any,
+    config: dict,
+    supplier: Any,
+    *,
+    supplier_name: str,
+    job_id: Any,
+    row: dict | None,
+    username: str,
+    portal_url: str | None = None,
+    page: Any = None,
+    process_id: Any = None,
+    credential_index: int | None = None,
+    credential_total: int | None = None,
+) -> CredentialFailure:
+    """Report one failed login of a multi-credential job (0.14.2).
+
+    Reads the supplier's ``_login_failure_*`` attributes (detail, kind,
+    screenshot, portal message, page URL; missing ones are fine), reports
+    them through ``handle_login_failure(team_alert=False,
+    multi_credential=True)`` naming the login - with ``page`` diagnosed and
+    screenshotted exactly as for a single login - resets the attributes for
+    the next credential, and returns the failure for
+    ``report_all_credentials_failed()``. Never raises.
+    """
+    detail = (getattr(supplier, "_login_failure_detail", "") or "").strip() or f"Login failed for user {username}"
+    if credential_index is not None and credential_total is not None:
+        detail = f"[credential {credential_index}/{credential_total}] {detail}"
+    try:
+        outcome = _handle_login_failure(
+            errors, config,
+            supplier_name=supplier_name, job_id=job_id, row=row, detail=detail,
+            kind=getattr(supplier, "_login_failure_kind", None),
+            username=username, portal_url=portal_url, team_alert=False,
+            screenshot=getattr(supplier, "_login_failure_screenshot", None),
+            process_id=process_id, multi_credential=True,
+            portal_message=getattr(supplier, "_login_failure_portal_message", None),
+            page_url=getattr(supplier, "_login_failure_page_url", None),
+            page=page,
+        )
+        failure = CredentialFailure(
+            username=username, kind=outcome.kind, detail=detail,
+            portal_message=outcome.portal_message, page_url=outcome.page_url,
+            screenshot=str(outcome.screenshot) if outcome.screenshot else None, portal_url=portal_url,
+        )
+    except Exception:
+        logger.exception("LOGIN_FAILURE - could not report the failed login %s on job %s", username, job_id)
+        failure = CredentialFailure(
+            username, _as_kind(getattr(supplier, "_login_failure_kind", None)), detail,
+            None, None, None, portal_url,
+        )
+    reset_supplier_login_failure(supplier)
+    return failure
+
+
+def report_all_credentials_failed(
+    errors: Any,
+    *,
+    supplier_name: str,
+    job_id: Any,
+    failures: list[CredentialFailure],
+    row: dict | None = None,
+    pending_accounts: int | None = None,
+    process_id: Any = None,
+    credential_total: int | None = None,
+) -> LoginFailureKind:
+    """The job-level report when every login of a multi-credential job failed
+    (0.14.2), replacing each bot's own ``errors.add("... all credentials ...")``.
+
+    Logs one ERROR line per login and a summary, and ``errors.add()``s one
+    job-level failure whose ``details`` carry ``all_credentials_failed``,
+    ``credentials`` (username, kind, description, portal message, page URL,
+    screenshot and detail per login) and ``kind`` - the most specific kind
+    across the logins. ``category`` is ``other``: each owner-fixable login
+    was already reported on its own, naming it, which is what inse-toolkit
+    acts on. Returns that kind. Never raises.
+
+    ``credential_total`` is how many logins the job has. When some of them
+    logged in (fewer failures than logins), the report says "failed on N of
+    M" instead of "all", and ``details["all_credentials_failed"]`` is False:
+    the job still stops because the last login failed with accounts pending.
+    """
+    row = row or {}
+    total = credential_total if credential_total is not None else len(failures)
+    every = len(failures) >= total
+    kind = LoginFailureKind.OTHER
+    for f in failures:
+        kind = escalate(kind, f.kind)
+    for i, f in enumerate(failures, start=1):
+        shown = f"'{f.portal_message}'" if f.portal_message else "(none shown)"
+        logger.error(
+            "LOGIN_FAILURE - %s job %s credential %d/%d user=%s | kind=%s | %s | portal_message=%s"
+            " | page_url=%s | screenshot=%s | detail=%s",
+            supplier_name, job_id, i, len(failures), f.username or "(none)", f.kind, describe(f.kind),
+            shown, f.page_url or "(unknown)", f.screenshot or "(none)", f.detail or "(no detail)",
+        )
+    summary = "; ".join(f"{f.username or '(none)'}: {f.kind}" for f in failures) or "(no logins tried)"
+    pending = f", {pending_accounts} account(s) still pending" if pending_accounts is not None else ""
+    scope = f"all {total}" if every else f"{len(failures)} of {total}"
+    logger.error(
+        "LOGIN_FAILURE - %s login failed on %s credential(s) for job %s%s | kind=%s | %s",
+        supplier_name, scope, job_id, pending, kind, summary,
+    )
+    job = _int_or_none(job_id)
+    details = {
+        "source": "odc_login_failure",
+        "category": CATEGORY_OTHER,
+        "kind": str(kind),
+        "kind_description": describe(kind),
+        "all_credentials_failed": every,
+        "failed_credentials": len(failures),
+        "credential_total": total,
+        "multi_credential": True,
+        "odc_job_id": job if job is not None else (str(job_id) if job_id is not None else None),
+        "supplier": supplier_name,
+        "client": _clip(row.get("client_name"), 300),
+        "pending_accounts": pending_accounts,
+        "process_id": _int_or_none(process_id),
+        "credentials": [
+            {
+                "username": _clip(f.username, 100),
+                "kind": str(f.kind),
+                "kind_description": describe(f.kind),
+                "portal_message": _clip(f.portal_message, 500),
+                "page_url": _clip(f.page_url, 300),
+                "screenshot": _clip(to_unc(f.screenshot), 500) if f.screenshot else None,
+                "detail": _clip(f.detail, 500),
+            }
+            for f in failures
+        ],
+        "detail": _clip(summary, 1000),
+    }
+    try:
+        _add_error(
+            errors,
+            f"{supplier_name} login failed on {scope} credential(s) for job {job_id}{pending}: {summary}",
+            details=details,
+        )
+    except Exception:
+        logger.exception("LOGIN_FAILURE - could not report the all-credentials failure for job %s", job_id)
+    return kind
 
 
 def _truthy(value: Any) -> bool:

@@ -388,6 +388,21 @@ entry point of its own.
   entry.
 
 ## Change Log
+- 2026-11-12: v0.14.2 - PATCH (the developer's choice of number; the change is additive). Detailed login-failure logging for Control Room triage:
+  new kinds `portal unavailable`, `login form not found`, `landing page not reached`,
+  `otp page not reached`, `otp rejected` (all category `other`; the toolkit's four categories
+  are unchanged), `describe()`, `diagnose_page()` / `read_portal_messages()` (visible
+  error/alert elements only, never the page body), and `handle_login_failure(page=,
+  portal_message=, page_url=)`; `details` gains `kind_description`, `portal_message`,
+  `page_url`. Every supplier bot wired to set the stage-specific kind and pass `page=`.
+  Also new `process_failure.report_process_error()` (same detail + a screenshot for every
+  non-login failure) and `login_failure.handle_credential_login_failure()` /
+  `report_all_credentials_failed()` so multi-credential jobs report the same way in every
+  bot. Also `process_failure.collect_errors(ctx)`: automation_core's `collect_errors`
+  (v1.16.0 unchanged) skips the Control Room sidecar and the summary on `SystemExit`, so
+  errors reported just before `sys.exit(1)` were lost; this wrapper lets the inner block
+  end normally, then re-raises the same `SystemExit`. Every supplier bot imports it.
+  364 tests pass; `diagnose_page()` checked against headless Chromium.
 - 2026-11-11: v0.14.1 - PATCH. The Control Room's failure triage now hands login failures
   to inse-toolkit, so the bot stops doing it: `report_login_failure()` /
   `report_login_success()` (0.14.0) are no-ops and `handle_login_failure()` no longer calls

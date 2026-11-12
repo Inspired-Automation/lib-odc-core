@@ -5,6 +5,21 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.14.2] - 2026-11-12
+### Added
+- New `process_failure` module: `report_process_error(errors, config, *, supplier_name, job_id, kind, detail, page, account_ref, job_details_id, exception, ...)` gives every non-login failure the same detail as a login failure. It screenshots the page (named after the kind, e.g. `download_failed_<account>`), reads the portal's error text and the URL, logs one `PROCESS_ERROR` line and `errors.add()`s it with `details` (`source: odc_process_error`, `category: other`, `kind`, `kind_description`, `account_ref`, `job_details_id`, `portal_message`, `page_url`, `screenshot`, `exception_type`, `detail`). `ProcessErrorKind`: portal unavailable, session expired, navigation failed, search failed, document list failed, download failed, file save failed, database error, configuration error, browser crashed, unhandled exception, other. A session-expired or unavailable message on the page sharpens a vague kind. Never raises.
+- `process_failure.collect_errors(ctx)`: use in place of `automation_core.collect_errors`. Errors reported just before `sys.exit(1)` (a failed login, all credentials failed) now reach the Control Room (`cr_errors.json`) and the summary notification; automation_core (v1.16.0) skipped both on `SystemExit`. The same `SystemExit` is re-raised, so the exit code is unchanged; exceptions and runs with no errors behave as before.
+- Multi-credential jobs report the same way in every bot: `handle_credential_login_failure(errors, config, supplier, ...)` reports one failed login (diagnosed and screenshotted as a single login) and resets the supplier's `_login_failure_*` attributes; `report_all_credentials_failed(...)` is the job-level report, with each login's kind, message, URL and screenshot in `details["credentials"]` (category `other`; owner-fixable logins were already reported one by one). Pass `credential_total=`: when some logins worked and only the last failed with accounts pending, the report says "failed on N of M credential(s)" and `all_credentials_failed` is False.
+- `handle_login_failure(page=...)` takes a screenshot (`login_<kind>`) when the bot passed none, and logs its path.
+- Specific login-failure kinds, so Control Room triage can separate failures that were all `other`: `LoginFailureKind.PORTAL_UNAVAILABLE`, `LOGIN_FORM_NOT_FOUND`, `LANDING_PAGE_NOT_REACHED`, `OTP_PAGE_NOT_REACHED`, `OTP_REJECTED`. All are triage category `other` (inse-toolkit accepts no new categories), none is emailed to SystemsLink or owner-fixable. `escalate()` ranks them by how far the login got, below the credential kinds.
+- `describe(kind)` / `KIND_DESCRIPTIONS`: a one-line description per kind ("Invalid credentials - ...", "Landing page not reached - ...").
+- `diagnose_page(page) -> PageDiagnosis(kind, portal_message, page_url)` and `read_portal_messages(page)`: read the visible error/alert elements (and a forced password-change page) off the page a login ended on, so an "invalid email or password" banner is always classified as `credentials rejected`. Never reads the whole page body; never raises.
+- `handle_login_failure(portal_message=, page_url=, page=)`. With `page`, the still-open page is diagnosed: the two fields are filled and the kind raised (never lowered).
+- `failure_details()` adds `kind_description`, `portal_message`, `page_url`.
+### Changed
+- `classify_portal_message()` also returns `OTP_REJECTED` ("the code you entered is incorrect", "verification code has expired") and `PORTAL_UNAVAILABLE` ("service temporarily unavailable", "under maintenance"); both were `OTHER`.
+- The `LOGIN_FAILURE` ERROR log line and the `errors.add()` message now carry the description, the portal's message and the page URL. Nothing parses the old wording (inse-toolkit reads `details`).
+
 ## [0.14.1] - 2026-11-11
 ### Changed
 - The Control Room's failure triage now decides what a failed run was and hands inse-toolkit the failures a business owner can fix (decided 2026-11-11). The bot's part is to give the Control Room something it can triage, every time:

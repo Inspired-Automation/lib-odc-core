@@ -42,7 +42,12 @@ ROW = {
     ("You must change your password to continue", K.PASSWORD_CHANGE_REQUIRED),
     ("", K.OTHER),
     (None, K.OTHER),
-    ("Service temporarily unavailable", K.OTHER),
+    ("Service temporarily unavailable", K.PORTAL_UNAVAILABLE),
+    ("The site is undergoing scheduled maintenance", K.PORTAL_UNAVAILABLE),
+    ("The code you entered is incorrect", K.OTP_REJECTED),
+    ("Your verification code has expired", K.OTP_REJECTED),
+    ("Invalid passcode", K.OTP_REJECTED),
+    ("Please enter the code we sent you", K.OTHER),
     ("Forgotten your password?", K.OTHER),
     ("Something went wrong, please try again later", K.OTHER),
 ])
@@ -512,7 +517,7 @@ def test_an_old_automation_core_without_details_is_still_told(mock_send, tmp_pat
     login_failure.handle_login_failure(
         OldErrors(), _config(tmp_path), supplier_name="Wave", job_id=1, row=ROW, detail="x",
     )
-    assert calls == ["Wave login failed for job 1 (other): x"]
+    assert calls == ["Wave login failed for job 1 (other): Unclassified login failure - see detail. Detail: x"]
 
 
 @patch("odc_core.db.pyodbc.connect")
@@ -531,3 +536,219 @@ def test_the_bot_no_longer_reports_to_the_database(mock_connect, tmp_path):
             detail="Invalid password", kind=K.CREDENTIALS_REJECTED,
         )
     mock_connect.assert_not_called()
+
+
+# --- 0.14.2: specific kinds, descriptions, page diagnosis ---------------------
+
+def test_every_kind_has_a_description():
+    for kind in K:
+        assert login_failure.describe(kind)
+    assert login_failure.describe(K.CREDENTIALS_REJECTED).startswith("Invalid credentials")
+    assert login_failure.describe("nonsense") == login_failure.describe(K.OTHER)
+
+
+@pytest.mark.parametrize("kind", [
+    K.PORTAL_UNAVAILABLE, K.LOGIN_FORM_NOT_FOUND, K.LANDING_PAGE_NOT_REACHED,
+    K.OTP_PAGE_NOT_REACHED, K.OTP_REJECTED,
+])
+def test_new_kinds_stay_in_the_other_category_and_are_not_emailed(kind):
+    # inse-toolkit rejects any category it does not know.
+    assert login_failure.category_for(kind) == "other"
+    assert kind not in login_failure.CLIENT_NOTIFIABLE_KINDS
+    assert kind not in login_failure.OWNER_FIXABLE_KINDS
+
+
+def test_escalate_prefers_the_furthest_stage_and_credentials_over_all():
+    e = login_failure.escalate
+    assert e(K.PORTAL_UNAVAILABLE, K.LOGIN_FORM_NOT_FOUND) == K.LOGIN_FORM_NOT_FOUND
+    assert e(K.OTP_PAGE_NOT_REACHED, K.PORTAL_UNAVAILABLE) == K.OTP_PAGE_NOT_REACHED
+    assert e(K.LANDING_PAGE_NOT_REACHED, K.OTHER) == K.LANDING_PAGE_NOT_REACHED
+    assert e(K.OTP_REJECTED, K.CREDENTIALS_REJECTED) == K.CREDENTIALS_REJECTED
+    assert e(K.LANDING_PAGE_NOT_REACHED, K.CREDENTIALS_REJECTED) == K.CREDENTIALS_REJECTED
+
+
+class _FakePage:
+    def __init__(self, messages, url="https://portal.example.com/login?err=1"):
+        self._messages = messages
+        self.url = url
+        self.frames = [self]
+
+    def evaluate(self, script, arg=None):
+        if isinstance(arg, list):
+            return list(self._messages)
+        return {}
+
+    def locator(self, selector):
+        loc = MagicMock()
+        loc.first.is_visible.return_value = False
+        loc.count.return_value = 0
+        return loc
+
+
+class _BrokenPage:
+    url = "about:blank"
+
+    @property
+    def frames(self):
+        raise RuntimeError("page closed")
+
+    def evaluate(self, *a, **k):
+        raise RuntimeError("page closed")
+
+    def locator(self, *a, **k):
+        raise RuntimeError("page closed")
+
+
+@patch("odc_core.password_change.detect_password_change", return_value=None)
+def test_diagnose_page_classifies_the_banner(_pc):
+    d = login_failure.diagnose_page(_FakePage(["Cookie settings", "Incorrect email or password"]))
+    assert d.kind == K.CREDENTIALS_REJECTED
+    assert d.portal_message.startswith("Incorrect email or password")
+    assert d.page_url == "https://portal.example.com/login?err=1"
+
+
+@patch("odc_core.password_change.detect_password_change", return_value=None)
+def test_diagnose_page_keeps_unrecognised_text(_pc):
+    d = login_failure.diagnose_page(_FakePage(["Something unexpected happened (ref 123)"]))
+    assert d.kind == K.OTHER
+    assert d.portal_message == "Something unexpected happened (ref 123)"
+
+
+@patch("odc_core.password_change.detect_password_change", return_value="url /change-password")
+def test_diagnose_page_spots_password_change(_pc):
+    d = login_failure.diagnose_page(_FakePage([]))
+    assert d.kind == K.PASSWORD_CHANGE_REQUIRED
+    assert "change-password" in d.portal_message
+
+
+def test_diagnose_page_never_raises():
+    d = login_failure.diagnose_page(_BrokenPage())
+    assert d.kind == K.OTHER and d.portal_message is None
+    assert login_failure.diagnose_page(None) == login_failure.PageDiagnosis(K.OTHER, None, None)
+
+
+def test_failure_details_carries_description_message_and_url():
+    details = login_failure.failure_details(
+        supplier_name="Acme Energy", job_id=7, kind=K.LANDING_PAGE_NOT_REACHED,
+        portal_message="Welcome back", page_url="https://portal.example.com/home",
+    )
+    assert details["category"] == "other"
+    assert details["kind"] == "landing page not reached"
+    assert details["kind_description"].startswith("Landing page not reached")
+    assert details["portal_message"] == "Welcome back"
+    assert details["page_url"] == "https://portal.example.com/home"
+
+
+@patch("odc_core.password_change.detect_password_change", return_value=None)
+@patch("odc_core.login_failure.graph_client.send_mail")
+def test_handle_reads_the_page_and_raises_the_kind(mock_send, _pc, tmp_path, caplog):
+    errors = MagicMock()
+    page = _FakePage(["Your email address or password is incorrect."])
+    with caplog.at_level("ERROR"):
+        login_failure.handle_login_failure(
+            errors, _config(tmp_path), supplier_name="Acme Energy", job_id=9, row=ROW,
+            detail="dashboard never loaded", kind=K.LANDING_PAGE_NOT_REACHED, page=page,
+        )
+    message = errors.add.call_args.args[0]
+    details = errors.add.call_args.kwargs["details"]
+    assert details["kind"] == "credentials rejected"
+    assert details["category"] == "login_error"
+    assert details["portal_message"] == "Your email address or password is incorrect."
+    assert "Invalid credentials" in message and "Portal said:" in message
+    assert "s3cret!" not in message and "s3cret!" not in caplog.text
+    assert "portal_message='Your email address or password is incorrect.'" in caplog.text
+    mock_send.assert_called_once()
+
+
+@patch("odc_core.password_change.detect_password_change", return_value=None)
+@patch("odc_core.login_failure.graph_client.send_mail")
+def test_handle_never_lowers_the_bots_kind(mock_send, _pc, tmp_path):
+    errors = MagicMock()
+    login_failure.handle_login_failure(
+        errors, _config(tmp_path), supplier_name="Acme Energy", job_id=9, row=ROW,
+        kind=K.OTP_PAGE_NOT_REACHED, page=_FakePage([]),
+    )
+    details = errors.add.call_args.kwargs["details"]
+    assert details["kind"] == "otp page not reached"
+    assert details["page_url"] == "https://portal.example.com/login?err=1"
+    mock_send.assert_not_called()
+
+
+@patch("odc_core.login_failure.graph_client.send_mail")
+def test_handle_with_a_closed_page_still_reports(mock_send, tmp_path):
+    errors = MagicMock()
+    login_failure.handle_login_failure(
+        errors, _config(tmp_path), supplier_name="Acme Energy", job_id=9, row=ROW,
+        kind=K.PORTAL_UNAVAILABLE, detail="goto timed out", page=_BrokenPage(),
+    )
+    assert errors.add.call_args.kwargs["details"]["kind"] == "portal unavailable"
+
+
+# --- 0.14.2: screenshot on failure, multi-credential helpers ------------------
+
+@patch("odc_core.password_change.detect_password_change", return_value=None)
+@patch("odc_core.browser_helpers.take_error_screenshot", return_value="C:/logs/shot.png")
+@patch("odc_core.login_failure.graph_client.send_mail")
+def test_handle_takes_a_screenshot_when_the_bot_did_not(mock_send, mock_shot, _pc, tmp_path):
+    errors = MagicMock()
+    page = _FakePage(["Incorrect password"])
+    page.is_closed = lambda: False
+    login_failure.handle_login_failure(
+        errors, _config(tmp_path), supplier_name="Acme Energy", job_id=9, row=ROW, page=page,
+    )
+    assert mock_shot.call_args.args[1] == "login_credentials_rejected"
+    assert errors.add.call_args.kwargs["details"]["screenshot"]
+
+
+class _Supplier:
+    pass
+
+
+@patch("odc_core.password_change.detect_password_change", return_value=None)
+@patch("odc_core.login_failure.graph_client.send_mail")
+def test_multi_credential_failures_are_reported_per_login_and_together(mock_send, _pc, tmp_path):
+    errors = MagicMock()
+    s = _Supplier()
+    s._login_failure_detail = "Landing page not reached"
+    s._login_failure_kind = K.LANDING_PAGE_NOT_REACHED
+    s._login_failure_screenshot = None
+    first = login_failure.handle_credential_login_failure(
+        errors, _config(tmp_path), s, supplier_name="Drax", job_id=5, row=ROW,
+        username="a@x.com", page=_FakePage(["Your password is incorrect"]),
+        credential_index=1, credential_total=2,
+    )
+    assert first.kind == K.CREDENTIALS_REJECTED
+    assert first.detail.startswith("[credential 1/2]")
+    assert s._login_failure_kind == K.OTHER and s._login_failure_detail == ""
+    per_login = errors.add.call_args.kwargs["details"]
+    assert per_login["username"] == "a@x.com" and per_login["multi_credential"] is True
+
+    s._login_failure_kind = K.PORTAL_UNAVAILABLE
+    second = login_failure.handle_credential_login_failure(
+        errors, _config(tmp_path), s, supplier_name="Drax", job_id=5, row=ROW, username="b@x.com",
+    )
+    assert second.kind == K.PORTAL_UNAVAILABLE
+
+    errors.reset_mock()
+    kind = login_failure.report_all_credentials_failed(
+        errors, supplier_name="Drax", job_id=5, failures=[first, second], row=ROW, pending_accounts=3,
+    )
+    assert kind == K.CREDENTIALS_REJECTED
+    message = errors.add.call_args.args[0]
+    details = errors.add.call_args.kwargs["details"]
+    assert "all 2 credential(s)" in message and "3 account(s) still pending" in message
+    assert details["category"] == "other" and details["all_credentials_failed"] is True
+    assert [c["username"] for c in details["credentials"]] == ["a@x.com", "b@x.com"]
+    assert details["credentials"][0]["portal_message"] == "Your password is incorrect"
+    assert "s3cret!" not in json.dumps(details)
+
+
+def test_some_logins_worked_is_not_called_all():
+    errors = MagicMock()
+    f = login_failure.CredentialFailure("c@x.com", K.CREDENTIALS_REJECTED, "d", None, None, None)
+    login_failure.report_all_credentials_failed(
+        errors, supplier_name="Drax", job_id=5, failures=[f], pending_accounts=2, credential_total=3,
+    )
+    assert "login failed on 1 of 3 credential(s) for job 5" in errors.add.call_args.args[0]
+    details = errors.add.call_args.kwargs["details"]
+    assert details["all_credentials_failed"] is False and details["credential_total"] == 3

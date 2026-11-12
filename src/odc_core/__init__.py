@@ -28,13 +28,14 @@ from . import (
     login_failure,
     password_change,
     pdf_auto_copy,
+    process_failure,
     sftp_upload,
     sugar_client,
     updatejobdetails,
     validate_username,
 )
 
-__version__ = "0.14.1"
+__version__ = "0.14.2"
 
 __all__ = [
     "browser_helpers",
@@ -50,6 +51,7 @@ __all__ = [
     "login_failure",
     "password_change",
     "pdf_auto_copy",
+    "process_failure",
     "sftp_upload",
     "sugar_client",
     "updatejobdetails",

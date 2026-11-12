@@ -587,6 +587,41 @@ retried. Raises `TimeoutError` when `timeout_s` elapses with no code. A message
 that matches the subject but contains no digit group is skipped rather than
 accepted, so polling continues.
 
+### 3.7b `process_failure` - uniform non-login error reporting (0.14.2)
+
+```python
+class ProcessErrorKind(StrEnum):  # portal unavailable, session expired, navigation failed,
+    ...                           # search failed, document list failed, download failed, file save
+                                  # failed, database error, configuration error, browser crashed,
+                                  # unhandled exception, other
+report_process_error(errors, config, *, supplier_name, job_id, kind, detail=None, page=None,
+                     account_ref=None, job_details_id=None, exception=None, screenshot=None,
+                     screenshot_label=None, process_id=None, username=None, team_alert=True,
+                     extra_selectors=()) -> dict
+screenshot_for(page, config, kind, label=None) -> Path | None
+collect_errors(ctx)  # context manager, yields automation_core's ErrorCollector
+```
+
+`collect_errors(ctx)` is `automation_core.collect_errors` with one difference: a `sys.exit()`
+inside the block no longer loses the errors already collected. automation_core (v1.16.0)
+writes `cr_errors.json` and sends the summary only when its block ends normally or with an
+`Exception`; `SystemExit` is neither, so a bot that reported a failed login and then called
+`sys.exit(1)` reached the Control Room with nothing. The wrapper catches the `SystemExit`
+inside automation_core's block, lets it end normally (sidecar `is_critical: false`, summary
+dispatched as usual), then re-raises the same `SystemExit`, so the exit code is unchanged.
+Exceptions pass straight through (critical, as before); an exit with no errors is unchanged.
+Supplier bots import it in place of automation_core's.
+
+Bots call it for every error that fails an account or ends the run, while the page is still
+open, so there is a screenshot of each kind of error before the process ends. Status values
+are unchanged: `NOT FOUND` stays a business fact and is not reported as an error.
+
+Multi-credential (in `login_failure`): per failed login
+`handle_credential_login_failure(errors, config, supplier, supplier_name=, job_id=, row=, username=,
+portal_url=, page=, credential_index=, credential_total=) -> CredentialFailure`; when every login
+failed, `report_all_credentials_failed(errors, supplier_name=, job_id=, failures=, row=,
+pending_accounts=)`.
+
 ### 3.7a `login_failure` - uniform login-failure handling (0.13.7; SystemsLink recipient 0.13.11; toolkit reporting 0.14.0, moved to the Control Room 0.14.1)
 
 **0.14.1 supersedes the toolkit-reporting parts of this section.** `report_login_failure()` and
@@ -597,6 +632,35 @@ accepted, so polling continues.
 multi-credential job (`team_alert=False`) naming it. `category_for(kind)` maps kinds to the
 Control Room's categories: `login_error`, `otp_not_received`, `recaptcha_not_completed`
 (`LoginFailureKind.RECAPTCHA_NOT_COMPLETED`, new), `other`.
+
+**0.14.2 - specific failure kinds.** So Control Room triage can tell login failures apart
+instead of seeing `other`, bots set the stage the login failed at:
+
+| Kind (`details.kind`) | Set when | Category |
+|---|---|---|
+| `credentials rejected` | The portal shows an invalid username/email/password message | `login_error` |
+| `account locked` | Locked / suspended / too many attempts message | `login_error` |
+| `password change required` | Forced password-change page (`password_change`) | `login_error` |
+| `otp not received` | OTP page reached, no code arrived in the mailbox | `otp_not_received` |
+| `otp rejected` | Code entered, portal said invalid/expired | `other` |
+| `otp page not reached` | Credentials submitted, OTP entry page never appeared | `other` |
+| `landing page not reached` | Credentials submitted, no error shown, expected post-login page never loaded | `other` |
+| `login form not found` | Login page loaded, username/password fields never appeared | `other` |
+| `portal unavailable` | `goto` failed/timed out, or maintenance / unavailable message | `other` |
+| `recaptcha not completed` | Human-assisted login not completed in time | `recaptcha_not_completed` |
+| `other` | None of the above | `other` |
+
+`category` keeps its four values (inse-toolkit rejects any other). `escalate()` ranks the
+credential kinds highest, then the further the login got the higher (OTP kinds > OTP page
+not reached > landing page not reached > login form not found > portal unavailable > other).
+`classify_portal_message()` also recognises OTP-rejected and portal-unavailable messages.
+`describe(kind)` / `KIND_DESCRIPTIONS` give a one-line label. `diagnose_page(page)` returns
+`PageDiagnosis(kind, portal_message, page_url)`: a forced password change, else the visible
+error/alert elements' text (never the whole body) classified. `handle_login_failure()` gains
+`portal_message=`, `page_url=` and `page=`; with `page` it diagnoses the still-open page,
+fills the two fields and raises (never lowers) the kind. `failure_details()` adds
+`kind_description`, `portal_message` and `page_url`, and the `errors.add()` message now reads
+`"{supplier} login failed for job {id} ({kind}): {description}. Detail: {detail} | Portal said: '...' | Page: ..."`.
 
 ```python
 class LoginFailureKind(StrEnum):
