@@ -76,6 +76,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from enum import StrEnum
 from pathlib import Path
+from urllib.parse import quote
 from typing import Any
 
 from file_allocation_core.routing import is_inspired_client
@@ -184,6 +185,11 @@ OWNER_FIXABLE_KINDS = frozenset({
 
 DEFAULT_SENDER = "noreply_automation@inspiredenergy.co.uk"
 DEFAULT_RECIPIENT = "support@systems-link.com"
+#: 0.14.3. Where the SystemsLink notice links to, so the service desk can fix the login in
+#: inse-toolkit (ODC collection report, Login problems). Override with
+#: ``login_failure_notification.toolkit_url``; set it to "" or "none" for no link.
+DEFAULT_TOOLKIT_URL = "https://toolkit.inspiredenergy.co.uk"
+TOOLKIT_PROBLEM_PATH = "/tools/odc-collection-report/login-problems/job/{job_id}"
 DEFAULT_COOLDOWN_HOURS = 24
 NOTICES_FOLDER = "LOGIN_FAILURE_NOTICES"
 _DEFAULT_BASE = r"\\inspiredenergysolutions.local\DFS\Public\!IES\BPI\Automation Team\Automated Processes\ODC"
@@ -470,6 +476,31 @@ def client_notice_recipient(
     return None, "dev run and no login_failure_notification.dev_recipient set"
 
 
+def toolkit_problem_url(
+    config: dict, job_id: Any, *, username: str | None = None, multi_credential: bool = False
+) -> str | None:
+    """The inse-toolkit link for this job's login problem (0.14.3), or None.
+
+    The bot emails before the failure reaches the toolkit (through the Control Room), so it
+    cannot know the toolkit's problem id: the link names the ODC job, and the toolkit finds the
+    problem for it (``/tools/odc-collection-report/login-problems/job/<id>``). On a job that
+    signs in with several logins, ``?login=`` names the one that failed. None when the job id is
+    not a number or ``login_failure_notification.toolkit_url`` is "" / "none"."""
+    settings = _settings(config)
+    base = settings.get("toolkit_url", DEFAULT_TOOLKIT_URL)
+    base = str(base if base is not None else "").strip().rstrip("/")
+    if not base or base.lower() == "none":
+        return None
+    job = _int_or_none(job_id)
+    if job is None:
+        return None
+    url = base + TOOLKIT_PROBLEM_PATH.format(job_id=job)
+    login = (username or "").strip()
+    if multi_credential and login:
+        url += "?login=" + quote(login, safe="")
+    return url
+
+
 def notices_dir(config: dict) -> Path:
     """Folder holding one marker file per supplier+login last emailed."""
     settings = _settings(config)
@@ -555,9 +586,11 @@ def build_client_email(
     client_name: str | None = None,
     job_id: Any = None,
     screenshot_attached: bool = False,
+    toolkit_url: str | None = None,
 ) -> tuple[str, str]:
     """Return ``(subject, body)`` for the SystemsLink notice about a client's
-    failed login. Plain text, never the password."""
+    failed login. Plain text, never the password. ``toolkit_url`` (0.14.3,
+    from ``toolkit_problem_url()``) adds where to fix the login in inse-toolkit."""
     supplier = (supplier_name or "the supplier").strip()
     client = (client_name or "").strip() or "(unknown client)"
     when = when or datetime.now()
@@ -566,6 +599,14 @@ def build_client_email(
     reason = _KIND_SENTENCE.get(kind, _KIND_SENTENCE[fallback])
     action = _KIND_ACTION.get(kind, _KIND_ACTION[fallback])
     attached = "A screenshot of the page the portal showed is attached.\n\n" if screenshot_attached else ""
+    toolkit = (
+        "Once the login works on the portal, update it in the Inspired toolkit and the bots "
+        "will test it and start collecting again:\n"
+        f"{toolkit_url}\n"
+        "(Open the link, enter the new password if it changed, tick the box and press "
+        "Save and test the login. You need a toolkit account and to be named as an owner "
+        "of this service.)\n\n"
+    ) if toolkit_url else ""
     subject = f"Action required: {client} - {supplier} portal login needs updating ({kind})"
     body = (
         "Hello,\n\n"
@@ -579,6 +620,7 @@ def build_client_email(
         f"Date of attempt: {when.strftime('%d/%m/%Y')}\n\n"
         f"{reason}\n\n"
         f"Action required: {action}\n\n"
+        f"{toolkit}"
         f"{attached}"
         "Until the login has been restored, we will be unable to collect this client's bills "
         "from this portal automatically.\n\n"
@@ -600,6 +642,7 @@ def notify_client(
     kind: LoginFailureKind | str | None,
     now: datetime | None = None,
     screenshot: str | Path | None = None,
+    multi_credential: bool = False,
 ) -> bool:
     """Email SystemsLink about a client's failed login if the rules allow, so
     they can get the client to fix it. Returns True if an email was sent.
@@ -634,6 +677,9 @@ def notify_client(
         supplier_name=supplier_name, username=login, portal_url=portal_url,
         kind=kind, when=now.astimezone(), client_name=client_name, job_id=job_id,
         screenshot_attached=bool(attachments),
+        toolkit_url=toolkit_problem_url(
+            config, job_id, username=login, multi_credential=multi_credential,
+        ),
     )
     graph_client.send_mail(
         config, recipient, subject, body,
@@ -921,6 +967,7 @@ def _handle_login_failure(
             portal_url=url,
             kind=kind,
             screenshot=screenshot,
+            multi_credential=multi,
         )
     except Exception as exc:
         logger.exception("LOGIN_FAILURE - could not email the SystemsLink notice about job %s", job_id)

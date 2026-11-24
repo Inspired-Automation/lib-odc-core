@@ -255,6 +255,7 @@ login_failure_notification:
   cooldown_hours: 24
   dev_recipient: ""       # dev runs email only this address, if set
   state_dir: ""           # default {pdf_auto.base_path}\{LIVE|DEV}\LOGIN_FAILURE_NOTICES
+  toolkit_url: https://toolkit.inspiredenergy.co.uk   # 0.14.3: login problem link in the email; "" / none = no link
 ```
 
 ## Development

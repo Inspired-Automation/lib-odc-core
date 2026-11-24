@@ -752,3 +752,66 @@ def test_some_logins_worked_is_not_called_all():
     assert "login failed on 1 of 3 credential(s) for job 5" in errors.add.call_args.args[0]
     details = errors.add.call_args.kwargs["details"]
     assert details["all_credentials_failed"] is False and details["credential_total"] == 3
+
+
+# --- 0.14.3: the toolkit link in the SystemsLink notice ---------------------
+
+def test_toolkit_problem_url_names_the_job(tmp_path):
+    url = login_failure.toolkit_problem_url(_config(tmp_path), 5839, username="billvalidation@au-ltd.co.uk")
+    assert url == "https://toolkit.inspiredenergy.co.uk/tools/odc-collection-report/login-problems/job/5839"
+
+
+def test_toolkit_problem_url_names_the_login_on_a_multi_login_job(tmp_path):
+    url = login_failure.toolkit_problem_url(
+        _config(tmp_path), "150", username="Bills+1@acme.co.uk", multi_credential=True,
+    )
+    assert url.endswith("/login-problems/job/150?login=Bills%2B1%40acme.co.uk")
+
+
+@pytest.mark.parametrize("override", ["", "none", None])
+def test_toolkit_problem_url_can_be_switched_off(tmp_path, override):
+    config = _config(tmp_path)
+    config["login_failure_notification"]["toolkit_url"] = override
+    assert login_failure.toolkit_problem_url(config, 5839) is None
+
+
+def test_toolkit_problem_url_needs_a_numeric_job(tmp_path):
+    assert login_failure.toolkit_problem_url(_config(tmp_path), "not-a-job") is None
+    assert login_failure.toolkit_problem_url(_config(tmp_path), None) is None
+
+
+def test_build_client_email_carries_the_toolkit_link():
+    link = "https://toolkit.inspiredenergy.co.uk/tools/odc-collection-report/login-problems/job/5839"
+    _, body = login_failure.build_client_email(
+        supplier_name="EDF Energy", username="billvalidation@au-ltd.co.uk", portal_url="https://edf.example",
+        kind=K.CREDENTIALS_REJECTED, client_name="Affiliated Utilities Limited", job_id=5839, toolkit_url=link,
+    )
+    assert link in body
+    assert "Save and test the login" in body
+    assert body.index("Action required:") < body.index(link)
+    _, without = login_failure.build_client_email(
+        supplier_name="EDF Energy", username="u", portal_url=None, kind=K.CREDENTIALS_REJECTED,
+        client_name="Affiliated Utilities Limited", job_id=5839,
+    )
+    assert "toolkit" not in without.lower()
+
+
+@patch("odc_core.login_failure.graph_client.send_mail")
+def test_handle_emails_systemslink_the_toolkit_link(mock_send, tmp_path):
+    login_failure.handle_login_failure(
+        MagicMock(), _config(tmp_path), supplier_name="EDF Energy", job_id=5839, row=ROW,
+        detail="Incorrect login details", kind=K.CREDENTIALS_REJECTED,
+    )
+    body = mock_send.call_args.args[3]
+    assert "/tools/odc-collection-report/login-problems/job/5839" in body
+    assert "?login=" not in body
+
+
+@patch("odc_core.login_failure.graph_client.send_mail")
+def test_handle_multi_login_link_names_the_failed_login(mock_send, tmp_path):
+    login_failure.handle_login_failure(
+        MagicMock(), _config(tmp_path), supplier_name="TotalEnergies", job_id=150, row=ROW,
+        detail="locked", kind=K.ACCOUNT_LOCKED, username="second@acme.co.uk", multi_credential=True,
+    )
+    body = mock_send.call_args.args[3]
+    assert "/login-problems/job/150?login=second%40acme.co.uk" in body

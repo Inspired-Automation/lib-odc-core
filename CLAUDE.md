@@ -388,6 +388,13 @@ entry point of its own.
   entry.
 
 ## Change Log
+- 2026-11-24: v0.14.3 - PATCH (additive). The SystemsLink login-failure email links to the
+  login problem in inse-toolkit (`/tools/odc-collection-report/login-problems/job/<ODC job id>`,
+  `?login=` on a multi-login job), where the five SystemsLink staff, named owners of the
+  Affiliated Utilities, ESOS Energy, Boxfish and Horizon services, fix the login. The link is by
+  job because the bot emails before the toolkit hears of the failure. New
+  `login_failure_notification.toolkit_url` (default the live toolkit; "" / "none" turns it off).
+  Decided by Jane Hong: SystemsLink's ticket stays the bot's email, now with the link.
 - 2026-11-12: v0.14.2 - PATCH (the developer's choice of number; the change is additive). Detailed login-failure logging for Control Room triage:
   new kinds `portal unavailable`, `login form not found`, `landing page not reached`,
   `otp page not reached`, `otp rejected` (all category `other`; the toolkit's four categories

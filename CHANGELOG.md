@@ -5,6 +5,11 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.14.3] - 2026-11-24
+### Added
+- The SystemsLink login-failure email links to the login problem in inse-toolkit, so the service desk can fix the login there (enter the new password, tick, Save and test the login) and the bots retest it: `https://toolkit.inspiredenergy.co.uk/tools/odc-collection-report/login-problems/job/<ODC job id>`, with `?login=<failed login>` on a job that signs in with several logins. The link names the ODC job because the bot emails before the failure reaches the toolkit (through the Control Room) and cannot know the toolkit's problem id; the toolkit finds the problem for the job. `toolkit_problem_url(config, job_id, *, username=, multi_credential=)`; `build_client_email(toolkit_url=)`; `notify_client(multi_credential=)`, passed by `handle_login_failure()`.
+- `login_failure_notification.toolkit_url` (default `https://toolkit.inspiredenergy.co.uk`); `""` or `none` leaves the link out.
+
 ## [0.14.2] - 2026-11-12
 ### Added
 - New `process_failure` module: `report_process_error(errors, config, *, supplier_name, job_id, kind, detail, page, account_ref, job_details_id, exception, ...)` gives every non-login failure the same detail as a login failure. It screenshots the page (named after the kind, e.g. `download_failed_<account>`), reads the portal's error text and the URL, logs one `PROCESS_ERROR` line and `errors.add()`s it with `details` (`source: odc_process_error`, `category: other`, `kind`, `kind_description`, `account_ref`, `job_details_id`, `portal_message`, `page_url`, `screenshot`, `exception_type`, `detail`). `ProcessErrorKind`: portal unavailable, session expired, navigation failed, search failed, document list failed, download failed, file save failed, database error, configuration error, browser crashed, unhandled exception, other. A session-expired or unavailable message on the page sharpens a vague kind. Never raises.
