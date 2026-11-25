@@ -388,6 +388,10 @@ entry point of its own.
   entry.
 
 ## Change Log
+- 2026-11-25: v0.14.4 - PATCH. The SystemsLink email's "Action required" line points at the
+  toolkit link (`_KIND_ACTION_TOOLKIT`, one wording per kind) instead of asking for the password
+  to be supplied to us; the old wording (`_KIND_ACTION`) is used only when the link is turned
+  off. Jane Hong's request after reading the 0.14.3 email.
 - 2026-11-24: v0.14.3 - PATCH (additive). The SystemsLink login-failure email links to the
   login problem in inse-toolkit (`/tools/odc-collection-report/login-problems/job/<ODC job id>`,
   `?login=` on a multi-login job), where the five SystemsLink staff, named owners of the

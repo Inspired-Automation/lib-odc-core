@@ -815,3 +815,25 @@ def test_handle_multi_login_link_names_the_failed_login(mock_send, tmp_path):
     )
     body = mock_send.call_args.args[3]
     assert "/login-problems/job/150?login=second%40acme.co.uk" in body
+
+
+# --- 0.14.4: the action line points at the toolkit when the email links to it -----
+
+@pytest.mark.parametrize("kind", [K.CREDENTIALS_REJECTED, K.ACCOUNT_LOCKED, K.PASSWORD_CHANGE_REQUIRED, K.OTP_NOT_RECEIVED])
+def test_action_line_points_at_the_toolkit_with_a_link(kind):
+    _, body = login_failure.build_client_email(
+        supplier_name="EDF Energy", username="u", portal_url=None, kind=kind,
+        client_name="Affiliated Utilities Limited", job_id=5839, toolkit_url="https://toolkit.example/x",
+    )
+    action = body[body.index("Action required:"):body.index("https://toolkit.example/x")]
+    assert "Inspired toolkit using the link below" in action
+    assert "supply the current password" not in body
+
+
+def test_action_line_unchanged_without_a_link():
+    _, body = login_failure.build_client_email(
+        supplier_name="EDF Energy", username="u", portal_url=None, kind=K.CREDENTIALS_REJECTED,
+        client_name="Affiliated Utilities Limited", job_id=5839,
+    )
+    assert "to supply the current password" in body
+    assert "toolkit" not in body.lower()

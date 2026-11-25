@@ -575,6 +575,31 @@ _KIND_ACTION = {
     ),
 }
 
+#: 0.14.4. The same step when the email links to inse-toolkit: SystemsLink no longer passes
+#: the password back to us, they enter it (or record the fix) in the toolkit themselves.
+_KIND_ACTION_TOOLKIT = {
+    LoginFailureKind.CREDENTIALS_REJECTED: (
+        "Please ask the client to confirm they can sign in to the portal with the login above "
+        "and, if the password has changed, for the current password. Then enter it in the "
+        "Inspired toolkit using the link below."
+    ),
+    LoginFailureKind.ACCOUNT_LOCKED: (
+        "Please ask the client to contact the supplier to have the login unlocked. Once it is, "
+        "record the fix in the Inspired toolkit using the link below, with the new password if "
+        "it changed."
+    ),
+    LoginFailureKind.PASSWORD_CHANGE_REQUIRED: (
+        "Please ask the client to change the password on this login on the supplier portal. "
+        "Then enter the new password in the Inspired toolkit using the link below."
+    ),
+    LoginFailureKind.OTP_NOT_RECEIVED: (
+        "Please ask the client to make sure the email address registered on this login delivers "
+        "or forwards the portal's one-time passcode emails to "
+        "noreply_automation@inspiredenergy.co.uk. Then record the fix in the Inspired toolkit "
+        "using the link below (no password is needed)."
+    ),
+}
+
 
 def build_client_email(
     *,
@@ -597,11 +622,12 @@ def build_client_email(
     kind = _as_kind(kind)
     fallback = LoginFailureKind.CREDENTIALS_REJECTED
     reason = _KIND_SENTENCE.get(kind, _KIND_SENTENCE[fallback])
-    action = _KIND_ACTION.get(kind, _KIND_ACTION[fallback])
+    actions = _KIND_ACTION_TOOLKIT if toolkit_url else _KIND_ACTION
+    action = actions.get(kind, actions[fallback])
     attached = "A screenshot of the page the portal showed is attached.\n\n" if screenshot_attached else ""
     toolkit = (
-        "Once the login works on the portal, update it in the Inspired toolkit and the bots "
-        "will test it and start collecting again:\n"
+        "Update the login here; the bots will then test it and start collecting again:"
+        "\n"
         f"{toolkit_url}\n"
         "(Open the link, enter the new password if it changed, tick the box and press "
         "Save and test the login. You need a toolkit account and to be named as an owner "

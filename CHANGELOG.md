@@ -5,6 +5,10 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.14.4] - 2026-11-25
+### Changed
+- The SystemsLink email's "Action required" line agrees with the toolkit link: instead of asking SystemsLink to get the client "to supply the current password" (which read as sending it back to us), it asks them to enter it, or record the fix, in the Inspired toolkit using the link below. One wording per kind (credentials rejected, account locked, password change required, OTP not received). The paragraph with the link now opens "Update the login here; the bots will then test it and start collecting again:". With `login_failure_notification.toolkit_url` turned off, the email is worded as in 0.14.2.
+
 ## [0.14.3] - 2026-11-24
 ### Added
 - The SystemsLink login-failure email links to the login problem in inse-toolkit, so the service desk can fix the login there (enter the new password, tick, Save and test the login) and the bots retest it: `https://toolkit.inspiredenergy.co.uk/tools/odc-collection-report/login-problems/job/<ODC job id>`, with `?login=<failed login>` on a job that signs in with several logins. The link names the ODC job because the bot emails before the failure reaches the toolkit (through the Control Room) and cannot know the toolkit's problem id; the toolkit finds the problem for the job. `toolkit_problem_url(config, job_id, *, username=, multi_credential=)`; `build_client_email(toolkit_url=)`; `notify_client(multi_credential=)`, passed by `handle_login_failure()`.
